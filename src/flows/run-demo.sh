@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download DEMO_URL and launch cs2 with +playdemo.
-# Required env: MATCH_ID, DEMO_URL. CLIP_BATCH_MODE=1 → batch-highlights mode.
+# Required env: MATCH_ID, DEMO_URL. CLIP_BATCH_MODE=1 â†’ batch-highlights mode.
 
 set -uo pipefail
 SCRIPT_TAG=run-demo
@@ -39,7 +39,7 @@ start_status_reporter
 # Demo playback render cap. We capture at 60Hz; 120 gives 2x headroom so cs2 keeps
 # delivering >=60 distinct presents/s through frame-time spikes. Present-driven
 # capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
-# (drops, no dups) — headroom keeps the 60fps output dup-free + A/V synced. The GPU
+# (drops, no dups) â€” headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 : "${CS2_FPS_MAX:=120}"
 # TrueView prediction for the spectated player's view: reconstructs the observed
@@ -72,7 +72,7 @@ steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
 
-start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
+start_snapshot_loop || warn "start_snapshot_loop failed â€” continuing without thumbnails"
 
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 stop_capture "$MATCH_ID"
@@ -152,7 +152,7 @@ demo_interpolateview 1
 // live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.
 mp_display_kill_assists 0
-// Don't let cs2 quit when a demo finishes — batch-highlights reuses the same
+// Don't let cs2 quit when a demo finishes â€” batch-highlights reuses the same
 // cs2 process across jobs, so an auto-quit would kill the remaining renders.
 demo_quitafterplayback 0
 EOF
@@ -170,7 +170,7 @@ fi
 # autoexec.cfg gets auto-execed by cs2 on engine init AND we pass
 # +exec live_autoexec on the command line. If both files carry the
 # same payload, every `exec observer.cfg` + every bind is interpreted
-# twice (~30 binds × 2 passes), visible in console.log. Keep
+# twice (~30 binds Ã— 2 passes), visible in console.log. Keep
 # autoexec.cfg stubbed; put the real payload in live_autoexec.cfg.
 printf '// see live_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
 
@@ -184,7 +184,7 @@ $DEMO_BINDS_BLOCK
 // TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
 cl_demo_predict ${CS2_DEMO_PREDICT}
 // X-ray (player outlines through walls): default ON for live demo spectating,
-// OFF for batch-highlights (clips are POV — x-ray would look wrong).
+// OFF for batch-highlights (clips are POV â€” x-ray would look wrong).
 spec_show_xray $([ "${CLIP_BATCH_MODE:-0}" = "1" ] && echo 0 || echo 1)
 // Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
 r_fullscreen_gamma 2
@@ -252,7 +252,7 @@ if [ -n "${WORKSHOP_ID:-}" ]; then
   if [ -f "$WORKSHOP_FAILED" ] \
      || ! compgen -G "$WORKSHOP_TARGET/*.vpk" >/dev/null 2>&1; then
     download_workshop_map "$WORKSHOP_ID" \
-      || warn "workshop map download failed — cs2 may stall on Subscribe prompt"
+      || warn "workshop map download failed â€” cs2 may stall on Subscribe prompt"
   fi
 fi
 
@@ -264,7 +264,7 @@ export PULSE_SERVER
 
 do_applaunch() {
   # +playdemo on the launch line so cs2 starts loading the demo during
-  # engine init — the stream never shows the main menu. -condebug tees
+  # engine init â€” the stream never shows the main menu. -condebug tees
   # cs2's console to csgo/console.log.
   #
   # Boot-time trim flags. The set below was the survivor of an
@@ -272,13 +272,13 @@ do_applaunch() {
   # between `server module init ok` and `DELAYED COMMAND: playdemo`.
   # Flags that demonstrably didn't bite on this cs2 build
   # (-nogamestats, -noassert, -allow_third_party_software, -vrmode
-  # none, -nominidumps, -language english) were dropped — the
+  # none, -nominidumps, -language english) were dropped â€” the
   # leaderboards job, localization spam, and BlurTarget warnings all
   # kept firing with them set.
   #   -disable_loadingplaque   recommended Source 2 perf hint
   #   +cl_disablehtmlmotd 1    skip HTML MOTD subsystem init
   # cs2 threads are left to the engine (auto-detect, Valve's recommendation);
-  # we pass -threads ONLY if CS2_THREADS is explicitly set — escape hatch for a
+  # we pass -threads ONLY if CS2_THREADS is explicitly set â€” escape hatch for a
   # misbehaving node. Unset/0 omits the flag.
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
@@ -295,7 +295,7 @@ do_applaunch() {
     +playdemo "$DEMO_FILE")
   export_cs2_shader_cache_env  # cs2-only GLCache env (pod-wide broke Steam)
   # Confine cs2 to its own cores (disjoint from the capture pipeline's) so the two
-  # never share a core — the affinity is inherited by the cs2 child of the steam
+  # never share a core â€” the affinity is inherited by the cs2 child of the steam
   # wrapper. No-op on <4-core boxes / when taskset is absent (see cs2_cpu_pin).
   compute_cpu_split  # set GS_CS2_CPUS/GS_CAPTURE_CPUS in THIS shell (the pin runs in a subshell)
   local cs2_pin=(); mapfile -t cs2_pin < <(cs2_cpu_pin)
@@ -330,7 +330,7 @@ done
 }
 
 if hud_running; then
-  # Forward HUD_MODE as the variant — omitting it resets the boot-
+  # Forward HUD_MODE as the variant â€” omitting it resets the boot-
   # time variant the auto-overlay set.
   curl -fsS -m 5 -X POST -o /dev/null \
        -H 'content-type: application/json' \
@@ -340,7 +340,7 @@ if hud_running; then
 fi
 
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
-  # No mediamtx publish — inline-clip-render.sh captures each clip on
+  # No mediamtx publish â€” inline-clip-render.sh captures each clip on
   # its own ffmpeg pass.
   report_status status=live "playback_mode=demo"
 else
@@ -366,7 +366,7 @@ fi
 
 # Batch mode: process every clip job against this cs2 instance, then
 # exit so the Job is reaped. cs2 launch is ~60-90s; reusing the
-# instance turns N clips × 90s overhead into a single launch.
+# instance turns N clips Ã— 90s overhead into a single launch.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   stop_snapshot_loop
   # shellcheck disable=SC1091

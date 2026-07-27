@@ -19,7 +19,7 @@ pulseaudio_running() {
 }
 
 start_pulseaudio() {
-  # PULSE_SERVER must NOT be set during bring-up — pulse interprets it
+  # PULSE_SERVER must NOT be set during bring-up â€” pulse interprets it
   # as "a server already exists, don't autospawn" and refuses to start.
   unset PULSE_SERVER
 
@@ -37,13 +37,13 @@ start_pulseaudio() {
   fi
 
   # Null sink for cs2's output. gstreamer reads from its .monitor.
-  # rate=48000 matches cs2 + the capture caps — the daemon default (44.1k)
+  # rate=48000 matches cs2 + the capture caps â€” the daemon default (44.1k)
   # forces a double resample (cs2 48k->44.1k sink, monitor 44.1k->48k capture).
-  # sink_properties with embedded spaces hits a parser bug — leave
+  # sink_properties with embedded spaces hits a parser bug â€” leave
   # description default; it's cosmetic.
   if ! pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$PULSE_SINK_NAME"; then
     pactl load-module module-null-sink sink_name="$PULSE_SINK_NAME" rate=48000 channels=2 >/dev/null \
-      || warn "module-null-sink load failed — apps will route to auto_null"
+      || warn "module-null-sink load failed â€” apps will route to auto_null"
   fi
   pactl set-default-sink "$PULSE_SINK_NAME" 2>/dev/null || true
 
@@ -53,7 +53,7 @@ start_pulseaudio() {
 
   # TCP listener so cs2 can find pulse via PULSE_SERVER even when
   # XDG_RUNTIME_DIR is scrubbed (Steam's -applaunch wrapper does that).
-  # auth-anonymous is safe — bound to loopback only.
+  # auth-anonymous is safe â€” bound to loopback only.
   if ! pactl list short modules 2>/dev/null | awk '{print $2}' | grep -qx module-native-protocol-tcp; then
     pactl load-module module-native-protocol-tcp \
       "listen=${PULSE_TCP_HOST}" "port=${PULSE_TCP_PORT}" \

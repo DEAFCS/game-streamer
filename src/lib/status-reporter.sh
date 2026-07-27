@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Posts streamer-pod status to the 5stack api. A background daemon owns
 # the latest-desired-state file; report_status updates it atomically;
-# the daemon's next loop POSTs whatever's newest. There is no queue —
+# the daemon's next loop POSTs whatever's newest. There is no queue â€”
 # intermediate states are dropped silently.
 #
 # POST ${STATUS_API_BASE}/game-streamer/${MATCH_ID}/status
@@ -42,7 +42,7 @@ fi
 : "${STATUS_BOOT_FILE:=$LOG_DIR/status.boot.epoch}"
 : "${STATUS_LAST_FILE:=$LOG_DIR/status.last}"
 
-# Auto-promote demo-session env to the override channel — whichever
+# Auto-promote demo-session env to the override channel â€” whichever
 # script starts the reporter first picks up the right wiring.
 _promote_demo_session_env() {
   if [ -z "$STATUS_REPORT_URL" ] && [ -n "${DEMO_SESSION_ID:-}" ]; then
@@ -76,8 +76,8 @@ _in_batch_broadcast_mode() {
 }
 
 # POSTs $body to /clip-renders/:id/status for every job in
-# CLIP_BATCH_JOBS. Curls fan out in parallel — N jobs cost max(curl)
-# (~3s timeout) not N*3s — and we wait so callers don't leak zombies.
+# CLIP_BATCH_JOBS. Curls fan out in parallel â€” N jobs cost max(curl)
+# (~3s timeout) not N*3s â€” and we wait so callers don't leak zombies.
 _broadcast_to_batch_jobs() {
   local body="$1"
   [ -n "$body" ] || return 0
@@ -117,7 +117,7 @@ _encode_status_body() {
   node "$helpers" status-body "$@" 2>/dev/null
 }
 
-# Fan errors out to every job in CLIP_BATCH_JOBS — batch pods have no
+# Fan errors out to every job in CLIP_BATCH_JOBS â€” batch pods have no
 # single status channel, so die() relies on this instead.
 broadcast_batch_error() {
   _in_batch_broadcast_mode || return 0
@@ -138,7 +138,7 @@ broadcast_batch_error() {
 }
 
 # Fan boot-stage ticks out as {status: "booting", boot_stage,
-# boot_progress} — the api keeps row.status untouched.
+# boot_progress} â€” the api keeps row.status untouched.
 broadcast_batch_status() {
   _in_batch_broadcast_mode || return 0
   [ "$#" -gt 0 ]           || return 0
@@ -270,7 +270,7 @@ _status_daemon_loop() {
       current_hash=$(sha256sum <"$STATUS_STATE_FILE" 2>/dev/null | awk '{print $1}')
       if [ -n "$current_hash" ] && [ "$current_hash" != "$last_hash" ]; then
         body=$(cat "$STATUS_STATE_FILE")
-        # The HTTP code is the LAST line of curl's combined output —
+        # The HTTP code is the LAST line of curl's combined output â€”
         # curl writes stderr first, then -w on stdout.
         curl_stderr=$(curl -sS -m 5 -X POST \
             -H "x-origin-auth: ${auth}" \
@@ -303,7 +303,7 @@ _status_daemon_loop() {
 start_status_reporter() {
   if ! _status_reporter_configured; then
     if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
-      log "status-reporter: batch-highlights mode — broadcasting per-job"
+      log "status-reporter: batch-highlights mode â€” broadcasting per-job"
     else
       log "status-reporter: disabled (MATCH_ID/MATCH_PASSWORD unset)"
     fi

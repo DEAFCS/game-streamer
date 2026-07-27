@@ -12,7 +12,7 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # fresh flows inherit the right value. The file wins over inherited env
 # because game-streamer.sh sources common.sh first (exporting DISPLAY=:0)
 # and then forks setup-steam / execs run-demo with that stale :0 still
-# in their env — the file is the only source of truth across the
+# in their env â€” the file is the only source of truth across the
 # fork/exec boundary.
 if [ -r "$LOG_DIR/display" ]; then
   DISPLAY=$(cat "$LOG_DIR/display" 2>/dev/null)
@@ -24,18 +24,18 @@ fi
 : "${CS2_DIR:=$STEAM_LIBRARY/steamapps/common/Counter-Strike Global Offensive}"
 # Persistent NVIDIA GLCache dir (holds cs2's compiled Vulkan shaders). The
 # __GL_SHADER_DISK_CACHE* env that enables it is exported per-cs2 only (see
-# shader-cache.sh) — pod-wide regressed Steam bring-up.
+# shader-cache.sh) â€” pod-wide regressed Steam bring-up.
 : "${GL_SHADER_CACHE_DIR:=$STEAM_LIBRARY/nvcache}"
 # Steam runs fossilize_replay rate-limited (background "don't hog the box"
 # mode). This pod is dedicated, so let it run full-tilt. Only fossilize
 # reads this, so it's safe to export globally.
 : "${FOSSILIZE_DISABLE_RATE_LIMITER:=1}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
-# mediamtx HTTP control API — start_capture polls to verify a publish
+# mediamtx HTTP control API â€” start_capture polls to verify a publish
 # actually landed (gst-launch loops happily on a failing srt sink).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
-# LOG_DIR (defaulted above) is a misnomer — k8s captures stdout/stderr;
+# LOG_DIR (defaulted above) is a misnomer â€” k8s captures stdout/stderr;
 # this holds non-log state (status files, JSON caches, marker files,
 # pid files, and the resolved-display pointer for cross-flow state).
 # Xorg's setuid wrapper accepts only a BARE filename for -config (not
@@ -44,7 +44,7 @@ fi
 CS2_WIDTH="${CS2_DISPLAY_RES%x*}"
 CS2_HEIGHT="${CS2_DISPLAY_RES#*x}"
 # Pick the matching Xorg dummy config. Unknown resolutions fall back
-# to 1080p — only the configs we ship work, anything else would die
+# to 1080p â€” only the configs we ship work, anything else would die
 # at Xorg startup. The available set is intentionally narrow: 1080p
 # and 1440p match the UI's resolution selector.
 case "$CS2_DISPLAY_RES" in
@@ -114,7 +114,7 @@ cs2_mark_fatal() {
 }
 
 # Stdout+stderr of the daemon stream to this process's stderr with a
-# "[<tag>] " prefix per line — k8s container logs become self-describing.
+# "[<tag>] " prefix per line â€” k8s container logs become self-describing.
 # nohup detaches so HUP doesn't kill it when launcher scripts exit;
 # the awk subprocess reparents to PID 1 and keeps tagging.
 spawn_logged() {
@@ -143,13 +143,13 @@ pick_h264_pipeline() {
   case "$GS_NVENC_PICK" in
     nvcudah264enc)
       # The modern CUDA encoder uses `rate-control` (not `rc-mode` like
-      # the legacy nvh264enc) — wrong name dies at pipeline-parse.
+      # the legacy nvh264enc) â€” wrong name dies at pipeline-parse.
       local preset tune
       case "$mode" in
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # No leading `cudaupload` â€” pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
       printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$kbps"
@@ -168,7 +168,7 @@ pick_h264_pipeline() {
 
 _resolve_h264_method() {
   # Called via $(...) so stdout is captured into GS_NVENC_PICK. Any
-  # informational logging MUST go to stderr — otherwise it gets glued
+  # informational logging MUST go to stderr â€” otherwise it gets glued
   # onto the encoder name and the gst-launch pipeline collapses to
   # "... ! ! ..." (syntax error).
   local force="${GS_NVENC_ELEMENT:-auto}"
@@ -202,7 +202,7 @@ _resolve_h264_method() {
   printf 'x264enc'
 }
 
-# Probe with the SAME property surface used in production — a future
+# Probe with the SAME property surface used in production â€” a future
 # GStreamer rev that renames/drops a property fails here instead of
 # silently passing and crashing at real-pipeline parse mid-match.
 _probe_nvcudah264enc() {
@@ -233,7 +233,7 @@ _probe_nvh264enc_preset() {
 }
 
 # Pick an H.265/HEVC encoder fragment. Returns nonzero if no NVENC HEVC
-# encoder is available; caller must fall back to h264 (no software fallback —
+# encoder is available; caller must fall back to h264 (no software fallback â€”
 # libx265 is too slow for the live and clip ffmpeg passes).
 # kbps is the h264-equivalent target; scaled to 70% internally for HEVC.
 # Cached in GS_NVENC_PICK_H265; override with GS_NVENC_H265_ELEMENT.
@@ -257,7 +257,7 @@ pick_h265_pipeline() {
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # No leading `cudaupload` â€” pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
       printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$h265_kbps"
@@ -271,7 +271,7 @@ pick_h265_pipeline() {
       return 1
       ;;
     *)
-      warn "GS_NVENC_PICK_H265='${GS_NVENC_PICK_H265}' unrecognized — treating as no NVENC HEVC"
+      warn "GS_NVENC_PICK_H265='${GS_NVENC_PICK_H265}' unrecognized â€” treating as no NVENC HEVC"
       return 1
       ;;
   esac
@@ -290,7 +290,7 @@ h265_available() {
 }
 
 _resolve_h265_method() {
-  # Log to stderr only — stdout is captured into GS_NVENC_PICK_H265.
+  # Log to stderr only â€” stdout is captured into GS_NVENC_PICK_H265.
   local force="${GS_NVENC_H265_ELEMENT:-auto}"
 
   if [ "$force" = "auto" ] || [ "$force" = "nvcudah265enc" ]; then
@@ -302,7 +302,7 @@ _resolve_h265_method() {
       return 0
     fi
     [ "$force" = "nvcudah265enc" ] && \
-      warn "GS_NVENC_H265_ELEMENT=nvcudah265enc forced but unavailable — falling through"
+      warn "GS_NVENC_H265_ELEMENT=nvcudah265enc forced but unavailable â€” falling through"
   fi
 
   if [ "$force" = "auto" ] || [ "$force" = "nvh265enc" ]; then
@@ -315,10 +315,10 @@ _resolve_h265_method() {
       fi
     fi
     [ "$force" = "nvh265enc" ] && \
-      warn "GS_NVENC_H265_ELEMENT=nvh265enc forced but unavailable — falling through"
+      warn "GS_NVENC_H265_ELEMENT=nvh265enc forced but unavailable â€” falling through"
   fi
 
-  log "  encoder: no NVENC HEVC encoder available — caller will fall back to h264" >&2
+  log "  encoder: no NVENC HEVC encoder available â€” caller will fall back to h264" >&2
   printf 'none'
   return 1
 }
@@ -353,7 +353,7 @@ _probe_nvh265enc_preset() {
 # Populate the NVENC pick cache for $codec if cold. pick_h26{4,5}_pipeline runs
 # in a `$(...)` subshell so its cached export never reaches the parent;
 # re-resolve here (same probe, stderr muted) so the scaler's CUDA-vs-CPU choice
-# matches the chosen encoder — else the scaler picks CPU for a CUDA encoder.
+# matches the chosen encoder â€” else the scaler picks CPU for a CUDA encoder.
 _ensure_nvenc_pick() {
   case "${1:-h264}" in
     h265|hevc)
@@ -397,7 +397,7 @@ _cuda_scale_available() {
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
 
-# True when this pod's `cudaupload` advertises DMABuf import on its sink — the
+# True when this pod's `cudaupload` advertises DMABuf import on its sink â€” the
 # prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
 # without import support negotiation fails and the consumer dies mid-render). Older
 # gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
@@ -419,7 +419,7 @@ _cudaupload_dmabuf_ok() {
 # present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the
 # GPU (cudaupload ! cudaconvertscale), removing the CPU videoscale +
 # videoconvert that otherwise competes with cs2 for cores. The CUDA encoder
-# fragments deliberately drop their own cudaupload — this fragment owns it.
+# fragments deliberately drop their own cudaupload â€” this fragment owns it.
 # Falls back to the all-CPU path for legacy nvenc / x264, and to a
 # CPU-convert-then-upload path if a CUDA encoder is paired with a pod that
 # lacks cudaconvertscale (so the encoder still receives CUDA memory).
@@ -448,7 +448,7 @@ pick_scale_convert() {
 # Contract guard for the pick_scale_convert -> encoder pairing: a CUDA NVENC
 # element (nvcudah26{4,5}enc) consumes CUDA memory, which pick_scale_convert
 # supplies (cudaupload / cudaconvertscale). Warns loudly if a caller paired a CUDA
-# encoder with a convert fragment that doesn't produce CUDA memory — i.e. built a
+# encoder with a convert fragment that doesn't produce CUDA memory â€” i.e. built a
 # pipeline without pick_scale_convert in front of the encoder. Usage:
 # _assert_cuda_chain "<convert fragment>" "<encoder fragment>".
 _assert_cuda_chain() {
@@ -456,13 +456,13 @@ _assert_cuda_chain() {
     *nvcudah264enc*|*nvcudah265enc*)
       case "$1" in
         *cudaupload*|*CUDAMemory*) ;;
-        *) warn "BUG: CUDA encoder fed non-CUDA memory — pick_scale_convert must precede the encoder (convert='$1')" ;;
+        *) warn "BUG: CUDA encoder fed non-CUDA memory â€” pick_scale_convert must precede the encoder (convert='$1')" ;;
       esac ;;
   esac
 }
 
 # obs-vkcapture present-hook needs nvidia-drm modeset on (its dmabuf sharing).
-# True unless we have POSITIVE evidence it's off — the host kernel param is visible
+# True unless we have POSITIVE evidence it's off â€” the host kernel param is visible
 # via the shared /sys; unreadable/absent -> assume on (don't block the default path
 # on a missing sysfs).
 _drm_modeset_on() {
@@ -473,13 +473,13 @@ _drm_modeset_on() {
 }
 
 # CPU split between cs2 and the capture pipeline. Pinning the capture consumer to
-# the top cores only ISOLATES it if cs2 is confined to the complementary cores —
+# the top cores only ISOLATES it if cs2 is confined to the complementary cores â€”
 # otherwise cs2's threads still schedule onto the capture cores and the two fight
-# (which jitters cs2's present + starves its audio thread → the frame/audio
+# (which jitters cs2's present + starves its audio thread â†’ the frame/audio
 # hitch). This computes one consistent split: capture gets the top CAPTURE_CORES
 # cores (default 2), cs2 gets the rest. Sets GS_CAPTURE_CPUS + GS_CS2_CPUS (taskset
 # -c lists). Env overrides win: pre-set CAPTURE_CPUS / CS2_CPUS are honored as-is;
-# empty string = "don't pin this side". Only splits on a box with ≥4 cores (below
+# empty string = "don't pin this side". Only splits on a box with â‰¥4 cores (below
 # that, carving out cores starves cs2 more than contention does). Idempotent.
 compute_cpu_split() {
   [ -n "${GS_CPU_SPLIT_DONE:-}" ] && return 0
@@ -491,9 +491,9 @@ compute_cpu_split() {
     [ "$capn" -ge "$ncpu" ] && capn=$(( ncpu - 1 ))
     caplo=$(( ncpu - capn )); caphi=$(( ncpu - 1 ))
     # `+x` test: only fill in a side the caller didn't explicitly set (even to "").
-    # Capture pin: status quo from ≥4 cores. cs2 pin: only once there are enough
-    # cores that confining cs2 still leaves it a healthy share — below
-    # GS_CS2_PIN_MIN_CORES (default 6 → cs2 keeps ≥4) we'd hand heavily-threaded
+    # Capture pin: status quo from â‰¥4 cores. cs2 pin: only once there are enough
+    # cores that confining cs2 still leaves it a healthy share â€” below
+    # GS_CS2_PIN_MIN_CORES (default 6 â†’ cs2 keeps â‰¥4) we'd hand heavily-threaded
     # cs2 too few exclusive cores, which hurts more than the contention it removes.
     [ -z "${CAPTURE_CPUS+x}" ] && CAPTURE_CPUS="${caplo}-${caphi}"
     if [ -z "${CS2_CPUS+x}" ] && [ "$ncpu" -ge "${GS_CS2_PIN_MIN_CORES:-6}" ]; then
@@ -519,7 +519,7 @@ cs2_cpu_pin() {
 # True when CLIP_CAPTURE_METHOD selects vkcapture AND it can run here (consumer
 # binary built + modeset on). Drives the present-hook for clips, and for the
 # live/demo composite (cs2 via present-hook + HUD overlay) in stream.sh. A miss =>
-# the ximagesrc fallback, which needs no DRM. NOTE: does not check cs2-running —
+# the ximagesrc fallback, which needs no DRM. NOTE: does not check cs2-running â€”
 # callers that capture pre-cs2 (DEBUG_STREAM boot) gate on that separately.
 vkcapture_available() {
   [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] || return 1

@@ -1,32 +1,32 @@
 # shellcheck shell=bash
-# File-output GStreamer pipeline for render-clip — mirrors stream.sh
+# File-output GStreamer pipeline for render-clip â€” mirrors stream.sh
 # but writes a local mp4 (qtmux + filesink) instead of publishing.
 
 # start_clip_capture <output-file> [fps] [video-kbps] [audio]
 # Sets $CLIP_CAPTURE_PID; stop with stop_clip_capture for clean EOS.
 # Dispatches on CLIP_CAPTURE_METHOD:
-#   vkcapture — obs-vkcapture Vulkan present-hook (DEFAULT). The layer inside cs2
+#   vkcapture â€” obs-vkcapture Vulkan present-hook (DEFAULT). The layer inside cs2
 #               (OBS_VKCAPTURE=1) shares the swapchain over a socket; our
 #               vkcapture-consumer feeds it into the NVENC pipeline below. Never
 #               touches the X server, so it can't stall cs2's present (the
 #               gunfight-stutter fix). Needs nvidia-drm.modeset=1 on the host.
-#   ximagesrc — the gstreamer X11-grab pipeline; fallback if vkcapture can't start.
+#   ximagesrc â€” the gstreamer X11-grab pipeline; fallback if vkcapture can't start.
 # vkcapture is gated on three preflight checks (binary present, nvidia-drm modeset
-# on — _drm_modeset_on in common.sh, consumer survives spawn); any miss => ximagesrc,
+# on â€” _drm_modeset_on in common.sh, consumer survives spawn); any miss => ximagesrc,
 # which needs no DRM and always works. The modeset gate matters because a modeset-off
-# node would spawn the consumer fine but never receive a dmabuf — so without it we'd
+# node would spawn the consumer fine but never receive a dmabuf â€” so without it we'd
 # produce empty segments instead of degrading cleanly.
 start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   if [ "$method" = "vkcapture" ]; then
     if ! command -v vkcapture-consumer >/dev/null 2>&1; then
-      warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed — using ximagesrc"
+      warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed â€” using ximagesrc"
     elif ! _drm_modeset_on; then
-      warn "CLIP_CAPTURE_METHOD=vkcapture but nvidia-drm modeset is OFF — using ximagesrc (set nvidia-drm.modeset=1 on the host to enable the present-hook)"
+      warn "CLIP_CAPTURE_METHOD=vkcapture but nvidia-drm modeset is OFF â€” using ximagesrc (set nvidia-drm.modeset=1 on the host to enable the present-hook)"
     elif _start_clip_capture_vkcapture "$@"; then
       return 0
     else
-      warn "vkcapture capture failed to start — falling back to ximagesrc"
+      warn "vkcapture capture failed to start â€” falling back to ximagesrc"
     fi
   fi
   _start_clip_capture_gst "$@"
@@ -45,10 +45,10 @@ _clip_resolve_encoder() {
         CLIP_PARSE_CAPS="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
         return 0
       fi
-      warn "CLIP_VIDEO_CODEC=$CLIP_CODEC but no NVENC HEVC encoder available — falling back to h264"
+      warn "CLIP_VIDEO_CODEC=$CLIP_CODEC but no NVENC HEVC encoder available â€” falling back to h264"
       ;;
     h264) : ;;
-    *) warn "CLIP_VIDEO_CODEC=$CLIP_CODEC unrecognized — using h264" ;;
+    *) warn "CLIP_VIDEO_CODEC=$CLIP_CODEC unrecognized â€” using h264" ;;
   esac
   CLIP_CODEC=h264
   CLIP_ENC=$(pick_h264_pipeline "$gop" "$kbps" clip)
@@ -86,7 +86,7 @@ _start_clip_capture_vkcapture() {
   _assert_cuda_chain "$convert" "$enc"
 
   # Zero-copy dmabuf import (VKCAP_ZEROCOPY, default ON): the consumer hands appsrc
-  # a DEVICE-LOCAL dmabuf and cudaupload imports it on the GPU — the CPU never
+  # a DEVICE-LOCAL dmabuf and cudaupload imports it on the GPU â€” the CPU never
   # copies a frame (vs. the host-map wc_copy + PCIe round-trip). Preflight gates it
   # to where it can work: the encode chain must be CUDA (a CPU videoconvert can't
   # consume memory:DMABuf) and this gst's cudaupload must advertise DMABuf import.
@@ -94,10 +94,10 @@ _start_clip_capture_vkcapture() {
   local zc="${VKCAP_ZEROCOPY:-1}"
   if [ "$zc" != "0" ]; then
     if [[ "$convert" != *cudaupload* ]]; then
-      warn "zero-copy wanted but encode chain isn't CUDA (no cudaupload) — using host-map copy"
+      warn "zero-copy wanted but encode chain isn't CUDA (no cudaupload) â€” using host-map copy"
       zc=0
     elif ! _cudaupload_dmabuf_ok; then
-      warn "zero-copy wanted but this gst cudaupload lacks memory:DMABuf import — using host-map copy"
+      warn "zero-copy wanted but this gst cudaupload lacks memory:DMABuf import â€” using host-map copy"
       zc=0
     else
       zc=1
@@ -109,14 +109,14 @@ _start_clip_capture_vkcapture() {
   export VKCAP_FPS="$fps"
   # Diagnostics: when the per-segment capture diag is on, have the consumer log
   # presents/s each second too. It's present-locked, so presents/s == cs2's real
-  # render fps — this is the missing signal next to the DIAG gpu/cpu lines (a low
+  # render fps â€” this is the missing signal next to the DIAG gpu/cpu lines (a low
   # presents/s with GPU pegged = GPU-bound; low presents/s with GPU idle + cs2cpu
   # near one core = sim/CPU-bound). Set CLIP_CAPTURE_DIAG=0 to mute both.
   [ "${CLIP_CAPTURE_DIAG:-1}" = "1" ] && export VKCAP_DEBUG="${VKCAP_DEBUG:-1}"
   # Pin the consumer to dedicated high cores so its gst threads don't pile
   # (wake-affinity) onto a core cs2 is using and jitter the sampling. cs2 is
   # pinned to the complementary cores at launch (cs2_cpu_pin), so the split is
-  # real — they never share a core. CAPTURE_CPUS overrides the list (empty = no pin).
+  # real â€” they never share a core. CAPTURE_CPUS overrides the list (empty = no pin).
   local capture_pin=()
   compute_cpu_split
   if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
@@ -126,7 +126,7 @@ _start_clip_capture_vkcapture() {
 
   # Spawn the consumer. Zero-copy can still fail at runtime on a bad node
   # (driver / dmabuf modifier); if the consumer dies on spawn, retry ONCE with
-  # zero-copy off (host-map copy) before giving up to ximagesrc — host-map
+  # zero-copy off (host-map copy) before giving up to ximagesrc â€” host-map
   # vkcapture still beats the X-server grab.
   local attempt
   for attempt in 1 2; do
@@ -160,17 +160,17 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
       return 0
     fi
     if [ "$zc" = "1" ]; then
-      warn "zero-copy consumer died on spawn — retrying with host-map copy"
+      warn "zero-copy consumer died on spawn â€” retrying with host-map copy"
       zc=0
       continue
     fi
-    warn "vkcapture-consumer died on spawn — obs-vkcapture layer not loaded in cs2 (OBS_VKCAPTURE=1 launch option?), nvidia-drm.modeset=1 missing on host, or bad gst pipeline"
+    warn "vkcapture-consumer died on spawn â€” obs-vkcapture layer not loaded in cs2 (OBS_VKCAPTURE=1 launch option?), nvidia-drm.modeset=1 missing on host, or bad gst pipeline"
     return 1
   done
   return 1
 }
 
-# Reads $CLIP_OUTPUT_DIMS from env to scale capture → output dims so
+# Reads $CLIP_OUTPUT_DIMS from env to scale capture â†’ output dims so
 # the produced mp4 is always at the spec'd resolution regardless of
 # the X display's native size (the node may run CS2 at 1080p or 1440p).
 _start_clip_capture_gst() {
@@ -260,7 +260,7 @@ stop_clip_capture() {
     sleep 0.1
   done
   if kill -0 "$pid" 2>/dev/null; then
-    warn "clip capture didn't exit — forcing"
+    warn "clip capture didn't exit â€” forcing"
     kill -9 "$pid" 2>/dev/null || true
   fi
   CLIP_CAPTURE_PID=""

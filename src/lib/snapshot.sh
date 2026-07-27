@@ -13,7 +13,7 @@
 : "${SNAPSHOT_FILE:=$LOG_DIR/snapshot.jpg}"
 : "${SNAPSHOT_GSI_MARKER:=$LOG_DIR/gsi-flowing}"
 
-# One-shot frame grab via gst-launch num-buffers=1 — independent of the
+# One-shot frame grab via gst-launch num-buffers=1 â€” independent of the
 # live encode pipeline, so a hiccup here can't drop the broadcast.
 _snapshot_capture_one() {
   local out="$1"

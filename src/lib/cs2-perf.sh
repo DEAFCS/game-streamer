@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# CS2 in-game perf helpers — autoexec convar block.
+# CS2 in-game perf helpers â€” autoexec convar block.
 # Sourced by src/flows/run-live.sh and src/flows/run-demo.sh; depends
 # on log/die/CS2_DIR/SRC_DIR from common.sh.
 #
@@ -14,7 +14,7 @@ cs2_perf_autoexec_block() {
   cat <<'EOF'
 // ===== VIDEO / PERFORMANCE =====
 
-// Resolution intentionally NOT set here — launch args force
+// Resolution intentionally NOT set here â€” launch args force
 // -windowed -noborder -width 1920 -height 1080 (required for the
 // HUD overlay to composite on top). mat_setvideomode would fight
 // the launch args and break the overlay.

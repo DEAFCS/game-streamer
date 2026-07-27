@@ -52,12 +52,12 @@ log "scaler fragment  : $conv"
 
 say "Verdict"
 if [[ "$conv" == *cudaconvertscale* ]]; then
-  log "GPU scale+convert ACTIVE — videoscale/videoconvert are OFF the CPU."
+  log "GPU scale+convert ACTIVE â€” videoscale/videoconvert are OFF the CPU."
 elif [[ "$conv" == *cudaupload ]]; then
-  log "CUDA encoder but CPU convert — cudaconvertscale not found on this pod."
+  log "CUDA encoder but CPU convert â€” cudaconvertscale not found on this pod."
   log "  (encoder still needs CUDA memory, so we CPU-convert then upload.)"
   log "  Install gstreamer's cudaconvertscale (nvcodec plugin) for the GPU path."
 else
-  log "CPU scale+convert — encoder is not CUDA-based, or GS_GPU_SCALE disables it."
+  log "CPU scale+convert â€” encoder is not CUDA-based, or GS_GPU_SCALE disables it."
   log "  Encoder picked: ${GS_NVENC_PICK_H265:-} ${GS_NVENC_PICK:-} (legacy nvenc/x264 -> no GPU scale)."
 fi

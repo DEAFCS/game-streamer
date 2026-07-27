@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Helpers for the cs2 spectator-control HTTP daemon — entry point at
+# Helpers for the cs2 spectator-control HTTP daemon â€” entry point at
 # src/spectator/server.mjs (refactored from the old single-file
 # src/spec-server.mjs). All ops idempotent.
 
@@ -11,7 +11,7 @@
 export SPEC_SERVER_PORT SPEC_SERVER_BIN
 
 # Match by the unique path fragment "spectator/server.mjs" rather than
-# the bare filename — `server.mjs` is generic enough that other tools
+# the bare filename â€” `server.mjs` is generic enough that other tools
 # could legitimately spawn a process with that name. The bracket
 # escape on the first char prevents pgrep matching itself.
 spec_server_running() {
@@ -20,11 +20,11 @@ spec_server_running() {
 
 start_spec_server() {
   if [ ! -f "$SPEC_SERVER_BIN" ]; then
-    warn "spec-server not found at $SPEC_SERVER_BIN — skipping"
+    warn "spec-server not found at $SPEC_SERVER_BIN â€” skipping"
     return 1
   fi
   if ! command -v node >/dev/null 2>&1; then
-    warn "node binary not found in PATH — spec-server requires Node.js"
+    warn "node binary not found in PATH â€” spec-server requires Node.js"
     return 1
   fi
   if spec_server_running; then
@@ -32,11 +32,11 @@ start_spec_server() {
     return 0
   fi
   log "starting spec-server on :$SPEC_SERVER_PORT"
-  # Bypass spawn_logged's awk subprocess — it dies when setup-steam.sh
+  # Bypass spawn_logged's awk subprocess â€” it dies when setup-steam.sh
   # exits, leaving spec-server's stdout pipe broken and its writes
   # silently dropped (Node ignores SIGPIPE). Redirect straight to
   # PID 1's stdout (the container init) which the k8s log collector
-  # tails — that handle survives every launcher script exiting.
+  # tails â€” that handle survives every launcher script exiting.
   # Lines are already prefixed with `[spec-server] ` from inside the
   # daemon so no awk-side tagging is needed.
   SPEC_PORT="$SPEC_SERVER_PORT" \

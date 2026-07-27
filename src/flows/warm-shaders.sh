@@ -30,7 +30,7 @@ steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
 
-start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
+start_snapshot_loop || warn "start_snapshot_loop failed â€” continuing without thumbnails"
 
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 rm -f /tmp/source_engine_*.lock
@@ -59,7 +59,7 @@ export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
 export PULSE_SERVER
 
 do_applaunch() {
-  # No +connect / +playdemo — just boot CS2 so Steam runs the precache.
+  # No +connect / +playdemo â€” just boot CS2 so Steam runs the precache.
   report_status status=launching_cs2
   local cs2_args=(
     -windowed -noborder
@@ -73,14 +73,14 @@ do_applaunch() {
   spawn_logged cs2-launch "${cmd[@]}"
 }
 do_applaunch
-# Returns once cs2 spawns — i.e. the foreground precache finished compiling.
+# Returns once cs2 spawns â€” i.e. the foreground precache finished compiling.
 wait_for_cs2_process do_applaunch
 
 # Exit as soon as background shader processing goes quiet instead of a fixed
 # wait. shader_report_progress returns 0 while a compile is still active (log
 # fresh + pct<100); once it's been idle for WARM_SETTLE_GRACE seconds we're
 # done. WARM_SETTLE_MAX caps the total wait as a backstop.
-log "foreground shader precache complete — waiting for background compile to settle"
+log "foreground shader precache complete â€” waiting for background compile to settle"
 settle_grace="${WARM_SETTLE_GRACE:-8}"
 settle_max="${WARM_SETTLE_MAX:-90}"
 idle=0

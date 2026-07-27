@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live capture profiler. Run this DURING an active stream to decide, from
 # data, whether the CPU-side framebuffer readback (ximagesrc) is actually a
-# bottleneck — i.e. whether a zero-copy GPU capture path (NVFBC / DMABUF /
+# bottleneck â€” i.e. whether a zero-copy GPU capture path (NVFBC / DMABUF /
 # gamescope) would buy you anything, or whether capture is already cheap and
 # you should leave the architecture alone.
 #
@@ -9,11 +9,11 @@
 #   defaults: 15s total, 1s samples.
 #
 # Each sample (over one interval) reports:
-#   gst%cpu   — capture process CPU, as % of ONE core (ximagesrc readback +
+#   gst%cpu   â€” capture process CPU, as % of ONE core (ximagesrc readback +
 #               any CPU convert + mux live here; NVENC is on a separate block)
-#   cs2%cpu   — cs2 process CPU, as % of one core (so >100% across its threads)
-#   GPU g/m%  — GPU core / memory utilisation
-#   hot cores — any logical core pinned >=85% this interval
+#   cs2%cpu   â€” cs2 process CPU, as % of one core (so >100% across its threads)
+#   GPU g/m%  â€” GPU core / memory utilisation
+#   hot cores â€” any logical core pinned >=85% this interval
 set -uo pipefail
 SCRIPT_TAG=profile-capture
 
@@ -47,7 +47,7 @@ if [ -n "$GST_PID" ]; then
     log "  scaler in use : videoscale/videoconvert (CPU)"
   fi
 else
-  warn "no capture process found (vkcapture-consumer / gst-launch) — is a stream running?"
+  warn "no capture process found (vkcapture-consumer / gst-launch) â€” is a stream running?"
 fi
 [ -n "$CS2_PID" ] && log "cs2 pid         : $CS2_PID" || warn "no cs2 process found"
 log "host            : ${NCPU} logical cores, CLK_TCK=${CLK}"
@@ -97,7 +97,7 @@ while [ "$i" -lt "$ITERS" ]; do
 done
 
 if [ -n "$GST_PID" ]; then
-  say "gst threads (busiest; %cpu is lifetime avg — stable on a steady stream)"
+  say "gst threads (busiest; %cpu is lifetime avg â€” stable on a steady stream)"
   ps -L -o tid,pcpu,comm -p "$GST_PID" --sort=-pcpu 2>/dev/null | head -8
 fi
 
@@ -115,8 +115,8 @@ cat <<'EOF'
     => contention; freeing capture cores would lift cs2's fps.
 - gst%cpu modest (<60%) and no hot cores
     => capture is NOT your bottleneck. Zero-copy buys latency/headroom but
-       little fps — not worth the rearchitect yet.
+       little fps â€” not worth the rearchitect yet.
 - GPU g% pinned ~100
     => you're GPU-bound; moving more work to the GPU could cost a little.
-       Check enc% above — NVENC is a separate block from the render cores.
+       Check enc% above â€” NVENC is a separate block from the render cores.
 EOF

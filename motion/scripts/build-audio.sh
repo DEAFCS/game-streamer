@@ -4,7 +4,7 @@
 # staticFile("outro-audio.wav").
 #
 # Design: a single tonal sub-bass thump at IMPACT_S over silence.
-# No drone, no chime — just the logo-strike impact.
+# No drone, no chime â€” just the logo-strike impact.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

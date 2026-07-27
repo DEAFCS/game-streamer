@@ -17,10 +17,10 @@ usage: $(basename "$0") <command>
 
   live              setup Steam + launch CS2 + start match capture
   demo              setup Steam + download \$DEMO_URL + play it back + capture
-  batch-highlights  demo flow with CLIP_BATCH_MODE=1 — renders \$CLIP_BATCH_JOBS
+  batch-highlights  demo flow with CLIP_BATCH_MODE=1 â€” renders \$CLIP_BATCH_JOBS
                     sequentially against the same cs2 instance, then exits
   warm-shaders      boot CS2, run the Vulkan shader precache to completion,
-                    then exit — pre-warms this node's cache (no match needed)
+                    then exit â€” pre-warms this node's cache (no match needed)
 EOF
 }
 
@@ -29,9 +29,9 @@ run_demo_flow() {
   if [ -n "${DEMO_URL:-}" ]; then
     DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
     if [ -s "$DEMO_FILE_BG" ]; then
-      # Already on disk (e.g. a dev re-run in the same pod) — skip the
+      # Already on disk (e.g. a dev re-run in the same pod) â€” skip the
       # re-download. run-demo.sh sees the file and skips its own fetch too.
-      log "demo already present at $DEMO_FILE_BG ($(stat -c%s "$DEMO_FILE_BG") bytes) — skipping download"
+      log "demo already present at $DEMO_FILE_BG ($(stat -c%s "$DEMO_FILE_BG") bytes) â€” skipping download"
     else
     rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
     (
@@ -40,7 +40,7 @@ run_demo_flow() {
       # shellcheck disable=SC1091
       . "$LIB_DIR/status-reporter.sh"
       SCRIPT_TAG=demo-download
-      # Report HERE — without this the only `downloading_demo` event
+      # Report HERE â€” without this the only `downloading_demo` event
       # comes from run-demo.sh after the file's already on disk, gets
       # coalesced by the 2s daemon poll, and the web stepper marks the
       # stage SKIPPED.
@@ -88,7 +88,7 @@ run_demo_flow() {
             mv -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG"
             rm -f "$DEMO_FILE_BG.partial"
           else
-            echo "${DEMO_DECOMPRESS_CMD} FAILED — marking download as failed"
+            echo "${DEMO_DECOMPRESS_CMD} FAILED â€” marking download as failed"
             rm -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG.partial"
             touch "$DEMO_FILE_BG.failed"
           fi
@@ -96,7 +96,7 @@ run_demo_flow() {
           mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
         fi
       else
-        echo "curl FAILED (exit $curl_rc) — marking download as failed"
+        echo "curl FAILED (exit $curl_rc) â€” marking download as failed"
         touch "$DEMO_FILE_BG.failed"
       fi
     ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
@@ -123,7 +123,7 @@ run_demo_flow() {
         sleep 2
       done
       if [ ! -f "$CS2_MANIFEST" ]; then
-        warn "cs2 manifest never appeared — skipping workshop download"
+        warn "cs2 manifest never appeared â€” skipping workshop download"
         touch "$WORKSHOP_FAILED"
         exit 0
       fi
@@ -135,7 +135,7 @@ run_demo_flow() {
     echo $! > /tmp/game-streamer/workshop-download.pid
   fi
   "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
-  # Cold-shader first-segment fix: the FIRST cs2 process renders cold — Vulkan
+  # Cold-shader first-segment fix: the FIRST cs2 process renders cold â€” Vulkan
   # pipelines compile on first encounter, stalling the render thread, so the first
   # segment's fps dips (GPU+CPU idle during the dip; later segments run warm). Run
   # Steam's Fossilize precache once per node (persists on the library volume) so the
@@ -143,10 +143,10 @@ run_demo_flow() {
   # batch only. setup-steam left Steam+Xorg up, which warm-shaders needs.
   if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
     if should_warm_shaders; then
-      log "shader pre-warm: cold ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto}) — warming once before render"
-      "$FLOWS_DIR/warm-shaders.sh" "$@" || warn "shader pre-warm failed — continuing (first segment may stutter)"
+      log "shader pre-warm: cold ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto}) â€” warming once before render"
+      "$FLOWS_DIR/warm-shaders.sh" "$@" || warn "shader pre-warm failed â€” continuing (first segment may stutter)"
     else
-      log "shader pre-warm: SKIPPED ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB ≥ ${GS_SHADERCACHE_MIN_MIB:-50}MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto})"
+      log "shader pre-warm: SKIPPED ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB â‰¥ ${GS_SHADERCACHE_MIN_MIB:-50}MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto})"
     fi
   fi
   exec "$FLOWS_DIR/run-demo.sh" "$@"

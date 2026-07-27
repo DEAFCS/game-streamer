@@ -28,8 +28,8 @@ start_capture() {
 
   # Output dims: scale capture to LIVE_OUTPUT_DIMS (default 1920x1080).
   # CS2 may render at 1440p natively, but the live HLS stream + HUD
-  # overlay CSS + viewer expectations all key off 1080p — and scaling
-  # 1440p → 1080p at capture time gives a supersampled 1080p that's
+  # overlay CSS + viewer expectations all key off 1080p â€” and scaling
+  # 1440p â†’ 1080p at capture time gives a supersampled 1080p that's
   # crisper than rendering CS2 natively at 1080p.
   local live_out="${LIVE_OUTPUT_DIMS:-1920x1080}"
   local out_w="${live_out%x*}"
@@ -43,7 +43,7 @@ start_capture() {
 
   log "starting capture '${stream_id}' (${out_w}x${out_h}@${fps}fps kbps=$kbps audio=$audio) -> $url"
 
-  # LIVE_VIDEO_CODEC=h265|h264. Default h264 — falls back to h264 if no NVENC HEVC.
+  # LIVE_VIDEO_CODEC=h265|h264. Default h264 â€” falls back to h264 if no NVENC HEVC.
   # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
   local codec="${LIVE_VIDEO_CODEC:-h264}"
   local enc="" parse=""
@@ -52,13 +52,13 @@ start_capture() {
       if enc=$(pick_h265_pipeline "$gop" "$kbps" live); then
         parse="h265parse config-interval=1"
       else
-        warn "LIVE_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
+        warn "LIVE_VIDEO_CODEC=$codec but no NVENC HEVC encoder available â€” falling back to h264"
         codec="h264"
       fi
       ;;
     h264) : ;;
     *)
-      warn "LIVE_VIDEO_CODEC=$codec unrecognized — using h264"
+      warn "LIVE_VIDEO_CODEC=$codec unrecognized â€” using h264"
       codec="h264"
       ;;
   esac
@@ -82,13 +82,13 @@ start_capture() {
     > "${args_dir}/capture-${stream_id}.args"
 
   # Resolve the audio source up front (both capture paths use it). Pin to our
-  # named null sink's .monitor — pactl's default can drift to hud-manager's Pulse
+  # named null sink's .monitor â€” pactl's default can drift to hud-manager's Pulse
   # client / silence.
   local pulse_source=""
   if [ "$audio" = 1 ]; then
     pulse_source="${pulse_sink}.monitor"
     if ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "$pulse_source"; then
-      warn "  ${pulse_source} not present — falling back to default source"
+      warn "  ${pulse_source} not present â€” falling back to default source"
       if command -v get_default_source >/dev/null 2>&1; then
         pulse_source=$(get_default_source)
       else
@@ -103,7 +103,7 @@ start_capture() {
   # Used for live + demo when vkcapture + cs2 + the HUD window are present; any
   # miss falls back to the plain ximagesrc grab below (HUD via picom).
   # HUD grab rate: match the OUTPUT fps so HUD elements (health/timer/money) update
-  # as smoothly as the game — grabbing at 30 over a 60fps composite made the HUD
+  # as smoothly as the game â€” grabbing at 30 over a 60fps composite made the HUD
   # visibly choppy. cs2 renders via the present-hook (not X), so this ximagesrc is
   # the only X-server capture load; LIVE-DIAG showed capture at ~1.2/2 cores, plenty
   # of headroom for 60. Override with HUD_CAPTURE_FPS.
@@ -121,7 +121,7 @@ start_capture() {
   if [ -n "$hud_xid" ]; then
     log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
     # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
-    # (BGRA) or it paints opaque over cs2 — verify this on-node first. The software
+    # (BGRA) or it paints opaque over cs2 â€” verify this on-node first. The software
     # compositor stays: LIVE-DIAG measured the capture at ~1.1 of its 2 cores, so the
     # blend is NOT CPU-bound and GPU compositing would buy nothing here.
     local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
@@ -130,7 +130,7 @@ start_capture() {
     local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
     # queue after the compositor = a thread boundary so the software blend and the
     # upload/encode run on separate cores (else they serialize on one). Bounded by
-    # buffer count — raw frames are big, so the default byte cap would throttle.
+    # buffer count â€” raw frames are big, so the default byte cap would throttle.
     local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
     local pipeline
     # Audio queue leaks like the video leg so it can't fall permanently behind.
@@ -146,11 +146,11 @@ $cs2_src \
 $hud_src"
     fi
     export VKCAP_FPS="$fps"
-    # With LIVE-DIAG on, also have the consumer log presents/s — present-locked,
+    # With LIVE-DIAG on, also have the consumer log presents/s â€” present-locked,
     # so presents/s == cs2's REAL render fps feeding the stream. This is the signal
-    # LIVE-DIAG lacked: presents/s consistently ≥ fps ⇒ the stream is true CFR and
+    # LIVE-DIAG lacked: presents/s consistently â‰¥ fps â‡’ the stream is true CFR and
     # any "not 60" feel is the camera switching or viewer-side; presents/s dipping
-    # below fps ⇒ cs2 isn't holding the rate under live load (videorate then dups).
+    # below fps â‡’ cs2 isn't holding the rate under live load (videorate then dups).
     [ "${GS_LIVE_DIAG:-1}" = "1" ] && export VKCAP_DEBUG="${VKCAP_DEBUG:-1}"
     # Zero-copy is clip-only: the software `compositor` here blends in system
     # memory and can't consume a device-local dmabuf. Force it off so a global
@@ -161,9 +161,9 @@ $hud_src"
     export VKCAP_HUD_CTL="$hud_ctl"
     # Pin the capture pipeline to dedicated high cores so its gst threads don't
     # pile (wake-affinity) onto a core cs2 is using and peg it. cs2 is pinned to
-    # the complementary cores at launch (cs2_cpu_pin), so the split is real — they
+    # the complementary cores at launch (cs2_cpu_pin), so the split is real â€” they
     # never share a core. CAPTURE_CPUS overrides the list (empty = no pin);
-    # CAPTURE_CORES sets the count (2 is the floor — capture needs ~1.7 cores).
+    # CAPTURE_CORES sets the count (2 is the floor â€” capture needs ~1.7 cores).
     local capture_pin=()
     compute_cpu_split
     if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
@@ -175,13 +175,13 @@ $hud_src"
     if kill -0 "$SPAWNED_PID" 2>/dev/null; then
       used_composite=1
     else
-      warn "composite consumer died on spawn — falling back to ximagesrc"
+      warn "composite consumer died on spawn â€” falling back to ximagesrc"
       rm -f "$hud_ctl"
       unset VKCAP_HUD_CTL
     fi
   fi
 
-  # ximagesrc fallback — grabs the composited X display (cs2 + HUD via picom). Used
+  # ximagesrc fallback â€” grabs the composited X display (cs2 + HUD via picom). Used
   # when the composite is unavailable (no vkcapture / no cs2 / no HUD window, e.g.
   # the DEBUG_STREAM boot watch) or its consumer died. leaky=downstream decouples
   # the grab from convert+NVENC so a downstream hitch can't back-pressure the grab.
@@ -218,7 +218,7 @@ $hud_src"
     fi
   fi
 
-  # Liveness check — must survive pulse / NVENC init / srt handshake.
+  # Liveness check â€” must survive pulse / NVENC init / srt handshake.
   local pid=$SPAWNED_PID
   local i
   for i in 1 2 3; do
@@ -232,7 +232,7 @@ $hud_src"
   # Live perf sampler: every GS_LIVE_DIAG_INTERVAL s (default 15) while the stream
   # runs, log GPU util/clock + cs2 CPU% + the CAPTURE pipeline's CPU%. This is the
   # one signal we lacked for live: if capcpu pegs ~its pin (200% on 2 cores) the
-  # capture is CPU-bound — almost always the SOFTWARE compositor (composite path) —
+  # capture is CPU-bound â€” almost always the SOFTWARE compositor (composite path) â€”
   # and GPU compositing is the fix; if cs2cpu/gpu dip with capcpu low it's cs2-side.
   # Slow cadence so a multi-hour stream doesn't spam; GS_LIVE_DIAG=0 mutes. Detaches
   # and self-exits when the capture pid dies.
@@ -242,7 +242,7 @@ $hud_src"
       cs2_pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
       hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
       jif() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null; }
-      # AUDIO-DIAG: pulse-side per-stream latency (ms) — where seconds of audio lag
+      # AUDIO-DIAG: pulse-side per-stream latency (ms) â€” where seconds of audio lag
       # can hide BEFORE the gst caps (skew slaving re-stamps late samples as live, so
       # PTS never shows it). srcout = readers of the cs2 monitor (our capture);
       # sinkin = cs2's write stream into the sink. Comma list = one value per stream;

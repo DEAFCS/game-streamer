@@ -5,7 +5,7 @@
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # A wedged X server (GTX 980 + nvidia 580 kernel-modeset hang) keeps its
-# process alive but never answers, so a bare xdpyinfo blocks forever — every
+# process alive but never answers, so a bare xdpyinfo blocks forever â€” every
 # probe is `timeout`-guarded so a wedge reads as "not answering" in 5s instead
 # of hanging the whole boot before a single log line is emitted.
 xorg_running() {
@@ -19,20 +19,20 @@ _try_start_xorg_on() {
   local n="$1"
   local disp=":$n"
 
-  # Foreign X already answering → leave it alone, move on. timeout-guarded so a
+  # Foreign X already answering â†’ leave it alone, move on. timeout-guarded so a
   # wedged foreign server on this display can't hang the walk (see xorg_running).
   if timeout 5 xdpyinfo -display "$disp" >/dev/null 2>&1; then
-    log "xorg: $disp already has a live X server — skipping"
+    log "xorg: $disp already has a live X server â€” skipping"
     return 1
   fi
-  # Lock file owned by a process visible to us → foreign X in our ns,
-  # don't clobber. (Cross-namespace owners won't be visible — the bind
+  # Lock file owned by a process visible to us â†’ foreign X in our ns,
+  # don't clobber. (Cross-namespace owners won't be visible â€” the bind
   # attempt below is the real backstop for that case.)
   if [ -e "/tmp/.X${n}-lock" ]; then
     local owner
     owner=$(awk '{print $1+0; exit}' "/tmp/.X${n}-lock" 2>/dev/null)
     if [ -n "$owner" ] && [ "$owner" -gt 0 ] && kill -0 "$owner" 2>/dev/null; then
-      log "xorg: $disp lock owned by live PID $owner — skipping"
+      log "xorg: $disp lock owned by live PID $owner â€” skipping"
       return 1
     fi
     rm -f "/tmp/.X${n}-lock" 2>/dev/null || true
@@ -41,7 +41,7 @@ _try_start_xorg_on() {
   [ -S "/tmp/.X11-unix/X${n}" ] && rm -f "/tmp/.X11-unix/X${n}" 2>/dev/null || true
 
   log "starting Xorg on $disp"
-  # Xorg.wrap (setuid) refuses absolute paths for -config — must be
+  # Xorg.wrap (setuid) refuses absolute paths for -config â€” must be
   # a bare filename in Xorg's search path.
   local cmd=(Xorg "$disp" -config "$XORG_CONFIG" -noreset
              -nolisten tcp -listen unix vt7)
@@ -58,7 +58,7 @@ _try_start_xorg_on() {
     fi
     sleep 0.5
   done
-  log "xorg: $disp never accepted clients within 10s — killing"
+  log "xorg: $disp never accepted clients within 10s â€” killing"
   kill "$xpid" 2>/dev/null || true
   return 1
 }
@@ -71,11 +71,11 @@ _try_start_xorg_on() {
 # write must never block boot, so warn + continue. Idempotent (persists at the
 # driver level until reboot), so running it every boot is harmless.
 enable_gpu_persistence() {
-  command -v nvidia-smi >/dev/null 2>&1 || { warn "nvidia-smi not found — skipping persistence mode"; return 0; }
+  command -v nvidia-smi >/dev/null 2>&1 || { warn "nvidia-smi not found â€” skipping persistence mode"; return 0; }
   if timeout 15 nvidia-smi -pm 1 >/dev/null 2>&1; then
     log "nvidia persistence mode enabled (-pm 1)"
   else
-    warn "could not enable nvidia persistence mode (-pm 1) — continuing"
+    warn "could not enable nvidia persistence mode (-pm 1) â€” continuing"
   fi
 }
 
@@ -97,24 +97,24 @@ start_xorg() {
   if xorg_running; then
     log "xorg already up on $DISPLAY"
   elif pgrep -x Xorg >/dev/null 2>&1; then
-    # Xorg process present but it just failed xorg_running's timeout probe →
+    # Xorg process present but it just failed xorg_running's timeout probe â†’
     # WEDGED (GPU/DRM modeset hang). It's unkillable (D state) and a fresh Xorg
     # on the same poisoned GPU just re-wedges, so recovery in-pod isn't reliable.
     # Fail loudly so the orchestrator restarts/reschedules instead of the boot
     # hanging invisibly on the dead server (the old failure mode: stuck forever
     # on xdpyinfo right after the status-reporter line, no further logs).
-    die "Xorg on $DISPLAY is present but unresponsive (>5s) — GPU/DRM modeset wedge; the node is likely poisoned until reboot. Failing so the pod reschedules."
+    die "Xorg on $DISPLAY is present but unresponsive (>5s) â€” GPU/DRM modeset wedge; the node is likely poisoned until reboot. Failing so the pod reschedules."
   else
-    # Resident-driver state before the first modeset — see enable_gpu_persistence.
+    # Resident-driver state before the first modeset â€” see enable_gpu_persistence.
     enable_gpu_persistence
     # Host may already be running a desktop on :0 (gnome-shell etc.) and
-    # bind-mount /tmp/.X11-unix into the pod — that collides with our
+    # bind-mount /tmp/.X11-unix into the pod â€” that collides with our
     # bind. Walk forward until we find a display we can actually claim,
     # then re-export DISPLAY so ximagesrc/xdotool/spectator follow.
     local found=""
     _xorg_try_displays && found="$XORG_FOUND"
 
-    # COEXIST fallback: the nvidia walk failed with "no screens found" → the
+    # COEXIST fallback: the nvidia walk failed with "no screens found" â†’ the
     # GPU's display is owned by another X server (a host Ubuntu desktop on :0, or
     # a leftover Xorg). The GPU only binds ONE X server for scanout, but its
     # render node is SHAREABLE, so retry with the dummy software-framebuffer X on
@@ -131,7 +131,7 @@ start_xorg() {
           *)         dummy_cfg=xorg-coexist-1080p.conf ;;
         esac
       fi
-      log "GPU display owned by another X server (host desktop?) — retrying with offscreen dummy X ($dummy_cfg); cs2 renders via the shared GPU render node, vkcapture still captures"
+      log "GPU display owned by another X server (host desktop?) â€” retrying with offscreen dummy X ($dummy_cfg); cs2 renders via the shared GPU render node, vkcapture still captures"
       export XORG_CONFIG="$dummy_cfg"
       rm -f /var/log/Xorg.*.log 2>/dev/null || true   # clear so a later grep is fresh
       _xorg_try_displays && found="$XORG_FOUND"
@@ -139,12 +139,12 @@ start_xorg() {
 
     if [ -z "$found" ]; then
       if grep -qs 'no screens found' /var/log/Xorg.*.log; then
-        die "Xorg can't get the GPU on this node — :0 is held ('server already running') and the GPU is already bound ('no screens found'), and the offscreen dummy-X fallback also failed. Free the GPU on the node (systemctl set-default multi-user.target && systemctl disable --now display-manager.service && systemctl isolate multi-user.target) or check GS_DUMMY_FALLBACK / the xorg-coexist configs."
+        die "Xorg can't get the GPU on this node â€” :0 is held ('server already running') and the GPU is already bound ('no screens found'), and the offscreen dummy-X fallback also failed. Free the GPU on the node (systemctl set-default multi-user.target && systemctl disable --now display-manager.service && systemctl isolate multi-user.target) or check GS_DUMMY_FALLBACK / the xorg-coexist configs."
       fi
       die "Xorg failed to start on any display in :${DISPLAY#:}..:$(( ${DISPLAY#:} + 9 ))"
     fi
     if [ "$found" != "$DISPLAY" ]; then
-      log "xorg: requested $DISPLAY was taken — running on $found instead"
+      log "xorg: requested $DISPLAY was taken â€” running on $found instead"
       export DISPLAY="$found"
     fi
   fi
@@ -187,7 +187,7 @@ list_x_windows() {
   [ "$count" = 0 ] && log "  (no named windows)"
 }
 
-# Find the main Steam UI window — largest "Steam"-named window at
+# Find the main Steam UI window â€” largest "Steam"-named window at
 # least 500x300. The real client is a child window deep in the X tree;
 # xdotool's getwindowgeometry doesn't reliably handle that case.
 find_main_steam_window() {
@@ -262,7 +262,7 @@ poke_steam_dialog() {
 
 # Click "Play anyway" on the "Cloud Out of Date" CEF modal (it ignores keystrokes,
 # so poke_steam_dialog won't work). Screenshots the Steam window's centre region
-# and confirms the blue button is actually there (node) BEFORE clicking — no
+# and confirms the blue button is actually there (node) BEFORE clicking â€” no
 # match => no click (never misclicks the store). Returns 0 only if it clicked.
 dismiss_cloud_dialog() {
   command -v xdotool >/dev/null 2>&1 && command -v gst-launch-1.0 >/dev/null 2>&1 \

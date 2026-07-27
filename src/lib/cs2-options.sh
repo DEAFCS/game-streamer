@@ -1,11 +1,11 @@
 # shellcheck shell=bash
 # Per-node cs2_video.txt overrides.
 # Inputs (env, set by API job spec):
-#   CS2_VIDEO_SETTINGS — JSON object with verbatim `setting.*` keys
+#   CS2_VIDEO_SETTINGS â€” JSON object with verbatim `setting.*` keys
 # Sourced by src/flows/run-live.sh and src/flows/run-demo.sh; depends
 # on log/warn/die/CS2_DIR/SRC_DIR from common.sh and requires `jq` on PATH.
 #
-# CS2 launch flags are hardcoded in run-live.sh / run-demo.sh — they
+# CS2 launch flags are hardcoded in run-live.sh / run-demo.sh â€” they
 # are HUD-overlay-load-bearing and not user-configurable.
 
 # Writes $CS2_DIR/game/csgo/cfg/cs2_video.txt by merging $CS2_VIDEO_SETTINGS
@@ -15,7 +15,7 @@
 # video.cfg.
 #
 # Arg 1 ($1) is the flow mode: "live" or "demo" (default "demo"). It
-# drives r_low_latency — only live wants NVIDIA Reflex on; demo / clip /
+# drives r_low_latency â€” only live wants NVIDIA Reflex on; demo / clip /
 # highlight renders pin it to 0 so frame pacing doesn't fight the
 # fixed-FPS capture sink.
 write_cs2_video_cfg() {
@@ -34,7 +34,7 @@ write_cs2_video_cfg() {
     overrides='{}'
   fi
 
-  # Auto mode: no per-node overrides — let cs2's first-launch auto-detect
+  # Auto mode: no per-node overrides â€” let cs2's first-launch auto-detect
   # generate cs2_video.txt against the actual GPU. Remove any leftover
   # file from a previous override run (it would be 0444 and block cs2's
   # writeback).
@@ -44,7 +44,7 @@ write_cs2_video_cfg() {
     return 0
   fi
 
-  # Locked keys — the streamer requires these exact values for HUD overlay
+  # Locked keys â€” the streamer requires these exact values for HUD overlay
   # compositing and headless capture to work. Stripped from user input so
   # the form (and direct DB edits) can't break the pod.
   # r_low_latency is force-set per-flow below (live=2, demo=0).

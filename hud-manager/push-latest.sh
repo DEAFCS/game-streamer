@@ -2,7 +2,7 @@
 # Build and push ghcr.io/5stackgg/hud-manager from the local hud-manager/
 # context.
 #
-# JTs Hud Manager (upstream JohnTimmermann/JTs-Hud-Manager — formerly
+# JTs Hud Manager (upstream JohnTimmermann/JTs-Hud-Manager â€” formerly
 # "OpenHud", renamed in v5.x) is consumed by game-streamer's Dockerfile
 # via `COPY --from=ghcr.io/5stackgg/hud-manager:<tag>`. This script
 # builds the Linux unpacked Electron output and publishes it as :latest
