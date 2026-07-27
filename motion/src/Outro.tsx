@@ -1,4 +1,4 @@
-import {
+﻿import {
   AbsoluteFill,
   Audio,
   Img,
@@ -16,7 +16,7 @@ import { BRAND, FONT_STACK } from "./brand";
 // change total duration, update DEFAULT_OUTRO_PROPS.durationS,
 // match this scale (TIME_SCALE = newDuration / 3.0), and run
 // scripts/build-audio.sh to regenerate the audio at matching
-// timings. Default: 3.0s ÷ 3.0s = 1.
+// timings. Default: 3.0s Ã· 3.0s = 1.
 const TIME_SCALE = 1;
 
 // FLASH_S is the impact beat; keep in sync with IMPACT_S in
@@ -24,10 +24,10 @@ const TIME_SCALE = 1;
 const FLASH_S = 0.5 * TIME_SCALE;
 const PARTICLE_COUNT = 42;
 
-// Shared glyph pool used by the 5STACK and .gg decrypt shimmer —
+// Shared glyph pool used by the 5STACK and .gg decrypt shimmer â€”
 // uppercase letters, digits and tactical-looking symbols.
 const GLYPH_POOL =
-  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ▣◈◆◇▤▥⊠⊞⊟⊡※‡†◢◣◤◥▰▱";
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZâ–£â—ˆâ—†â—‡â–¤â–¥âŠ âŠžâŠŸâŠ¡â€»â€¡â€ â—¢â—£â—¤â—¥â–°â–±";
 
 export const outroSchema = z.object({
   width: z.number().int().positive().default(1920),
@@ -58,7 +58,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const centerY = height * 0.46;
   const logoY = centerY - logoSize * 0.55;
   const titleY = centerY + logoSize * 0.55;
-  // Reference Y for the subtitle line — anchors where "THE
+  // Reference Y for the subtitle line â€” anchors where "THE
   // SYSTEM BEHIND THE GAME" sits beneath the wordmark.
   const subtitleTop = titleY + titleSize * 1.45;
   const yoursTop = subtitleTop + Math.round(titleSize * 0.6);
@@ -164,7 +164,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const rimGlow = Math.max(0.35, flashOpacity);
 
   // ---- Wordmark decrypt timings --------------------------------
-  const STACK_CHARS = ["5", "S", "T", "A", "C", "K"];
+  const STACK_CHARS = ["D", "E", "A", "F", "C", "S"];
   const WORDMARK_START = 0.95 * TIME_SCALE;
   const LETTER_STAGGER = 0.03 * TIME_SCALE;
   const LETTER_DURATION = 0.22 * TIME_SCALE;
@@ -181,9 +181,10 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const GG_RESOLVE_TIMES = [
     GG_TRIGGER_T + 0.22 * TIME_SCALE, // "."
     GG_TRIGGER_T + 0.38 * TIME_SCALE, // first "g"
-    GG_TRIGGER_T + 0.54 * TIME_SCALE, // last "g" — LOCK
+    GG_TRIGGER_T + 0.54 * TIME_SCALE, // "e"
+    GG_TRIGGER_T + 0.70 * TIME_SCALE, // "t" - LOCK
   ];
-  const GG_LOCK_T = GG_RESOLVE_TIMES[2];
+  const GG_LOCK_T = GG_RESOLVE_TIMES[3];
 
   const ggSpring = spring({
     frame: frame - Math.round(fps * GG_TRIGGER_T),
@@ -211,7 +212,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
 
   const lineFullW = titleSize * 6.4;
   const lineLeftX = (width - lineFullW) / 2;
-  // .gg sits roughly 66% along the wordmark width — origin for
+  // .gg sits roughly 66% along the wordmark width â€” origin for
   // the bullet impact + grenade effects.
   const sparkX = lineLeftX + lineFullW * 0.66;
   const sparkY = titleY + titleSize * 0.5;
@@ -252,15 +253,15 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   });
 
   // ---- Tagline (split across the line) -------------------------
-  // "The System Behind the Game" above the line — sets context
-  // while the wordmark decrypts. "Yours." below the line —
+  // "The System Behind the Game" above the line â€” sets context
+  // while the wordmark decrypts. "Yours." below the line â€”
   // arrives just after .gg locks as the punctuation.
   const TOP_TAGLINE_T = 1.3 * TIME_SCALE;
   // Slight delay after .gg renders so YOURS feels like a
   // deliberate follow-beat, not a simultaneous flash.
   const BOTTOM_TAGLINE_T = GG_LOCK_T + 0.18 * TIME_SCALE;
 
-  // The "." in "Yours." pulses + glows when YOURS arrives —
+  // The "." in "Yours." pulses + glows when YOURS arrives â€”
   // the tagline's own climax beat keyed to BOTTOM_TAGLINE_T.
   const periodPulse = interpolate(
     t,
@@ -463,7 +464,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
         </div>
 
         {/* ============================================================
-            WORDMARK — "5STACK.gg" with decrypt shimmer
+            WORDMARK â€” "5STACK.gg" with decrypt shimmer
             ============================================================ */}
         <div
           style={{
@@ -489,7 +490,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             const cycling = t >= start && t < resolve;
             const resolved = t >= resolve;
             // Inline-block so each char can carry its own
-            // opacity/textShadow. Natural width — letter-spacing on
+            // opacity/textShadow. Natural width â€” letter-spacing on
             // the parent gives consistent visual gaps between
             // chars regardless of glyph width.
             const cellStyle: React.CSSProperties = {
@@ -541,7 +542,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             );
           })}
 
-          {/* .gg — bullets in scaled, then each char decrypts in
+          {/* .gg â€” bullets in scaled, then each char decrypts in
               sequence. The last 'g' is the LOCK moment. */}
           <span
             style={{
@@ -551,12 +552,12 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
               transformOrigin: "left center",
             }}
           >
-            {[".", "g", "g"].map((char, i) => {
+            {[".", "n", "e", "t"].map((char, i) => {
               const resolve = GG_RESOLVE_TIMES[i];
               const cycling = t >= GG_TRIGGER_T && t < resolve;
               const resolved = t >= resolve;
               // Default to the natural char so the layout box is
-              // always reserved — prevents "5STACK" from snapping
+              // always reserved â€” prevents "5STACK" from snapping
               // leftward when .gg first appears. The parent span's
               // opacity/scale handle the visual entry.
               let display: string = char;
@@ -622,87 +623,11 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
       </div>
       {/* /stage */}
 
-      {/* ============================================================
-          QUIET PROOF — no line, no explosion. Typography is the
-          finale: small-caps subtitle + italic serif "Yours" with
-          a period that pulses synchronously with .gg locking.
-          The . in "Yours." rhymes with the . in ".gg".
-          ============================================================ */}
-
-      {/* Subtitle — fades in during the decrypt to set context */}
-      <div
-        style={{
-          position: "absolute",
-          top: subtitleTop,
-          left: 0,
-          width: "100%",
-          textAlign: "center",
-          fontFamily: FONT_STACK,
-          fontSize: Math.round(titleSize * 0.17),
-          fontWeight: 300,
-          letterSpacing: "0.42em",
-          textTransform: "uppercase",
-          color: BRAND.textMuted,
-          opacity: topTaglineO * 0.85,
-          transform: `translateY(${topTaglineDy}px)`,
-          textShadow: "0 2px 14px rgba(0,0,0,0.7)",
-          pointerEvents: "none",
-          // Trailing letter-spacing pushes visual centre right;
-          // nudge with matching left padding so it reads centred.
-          paddingLeft: "0.42em",
-        }}
-      >
-        The System Behind the Game
-      </div>
-
-      {/* YOURS. — Oxanium 900, all caps, matching the wordmark's
-          voice. Appears after .gg locks. The period pulses
-          synchronously with .gg locking as the brand's signature
-          punctuation moment. */}
-      <div
-        style={{
-          position: "absolute",
-          top: yoursTop,
-          left: 0,
-          width: "100%",
-          textAlign: "center",
-          fontFamily: FONT_STACK,
-          fontSize: Math.round(titleSize * 0.42),
-          fontWeight: 900,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
-          color: BRAND.amber,
-          opacity: bottomTaglineO,
-          transform: `translateY(${(1 - bottomTaglineSpring) * 12}px)`,
-          textShadow:
-            "0 0 22px hsl(33, 94%, 58%, 0.45), 0 0 8px hsl(33, 94%, 58%, 0.35), 0 4px 18px rgba(0,0,0,0.7)",
-          // Trailing letter-spacing pushes visual centre right;
-          // nudge with matching left padding so it reads centred.
-          paddingLeft: "0.08em",
-          pointerEvents: "none",
-        }}
-      >
-        <span>Yours</span>
-        <span
-          style={{
-            display: "inline-block",
-            transform: `scale(${periodPulse})`,
-            transformOrigin: "center 80%",
-            textShadow:
-              periodGlow > 0.001
-                ? `0 0 ${28 * periodGlow}px ${BRAND.amber}, 0 0 ${60 * periodGlow}px hsl(33, 94%, 58%, ${0.75 * periodGlow})`
-                : undefined,
-            color:
-              periodGlow > 0.001
-                ? `hsl(33, 100%, ${58 + 22 * periodGlow}%)`
-                : BRAND.amber,
-            paddingLeft: "0.02em",
-          }}
-        >
-          .
-        </span>
-      </div>
-
     </AbsoluteFill>
   );
 };
+
+
+
+
+
