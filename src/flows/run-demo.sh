@@ -81,8 +81,16 @@ rm -f /tmp/source_engine_*.lock
 rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
       "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
 
-report_status status=downloading_demo \
-  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+# This is the only place stream_url is reported, so it goes out either
+# way — but claiming `downloading_demo` when the parallel download already
+# landed walks the stepper (and the session row) backwards.
+if [ -s "$DEMO_FILE" ]; then
+  report_status status=demo_ready event=1 \
+    "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+else
+  report_status status=downloading_demo \
+    "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+fi
 
 # game-streamer.sh's `demo` flow downloads in parallel with setup-steam.
 # Wait on the marker files; fall back to inline if no parallel download
@@ -132,6 +140,7 @@ if [ ! -f "$DEMO_FILE" ]; then
       ;;
   esac
 fi
+report_status status=demo_ready event=1
 
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"

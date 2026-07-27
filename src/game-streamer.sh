@@ -8,6 +8,8 @@ SCRIPT_TAG=game-streamer
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/shader-cache.sh"   # should_warm_shaders for the batch pre-warm
+# shellcheck disable=SC1091
+. "$LIB_DIR/status-reporter.sh"   # demo_ready on the already-on-disk path
 
 load_env
 
@@ -31,7 +33,8 @@ run_demo_flow() {
     if [ -s "$DEMO_FILE_BG" ]; then
       # Already on disk (e.g. a dev re-run in the same pod) â€” skip the
       # re-download. run-demo.sh sees the file and skips its own fetch too.
-      log "demo already present at $DEMO_FILE_BG ($(stat -c%s "$DEMO_FILE_BG") bytes) â€” skipping download"
+      log "demo already present at $DEMO_FILE_BG ($(stat -c%s "$DEMO_FILE_BG") bytes) — skipping download"
+      report_status status=demo_ready event=1
     else
     rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
     (
@@ -98,6 +101,12 @@ run_demo_flow() {
       else
         echo "curl FAILED (exit $curl_rc) â€” marking download as failed"
         touch "$DEMO_FILE_BG.failed"
+      fi
+      # This download runs alongside setup-steam, so the stepper's
+      # "Downloading demo" row has no other way to learn it finished —
+      # without this tick it spins until cs2 launches, minutes later.
+      if [ -s "$DEMO_FILE_BG" ] && [ ! -f "$DEMO_FILE_BG.failed" ]; then
+        report_status status=demo_ready event=1
       fi
     ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/demo-download.pid

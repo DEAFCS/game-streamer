@@ -31,6 +31,7 @@ require_env STEAM_USER STEAM_PASSWORD
 
 start_status_reporter
 
+preflight_gpu
 start_xorg
 start_snapshot_loop || warn "start_snapshot_loop failed â€” continuing without thumbnails"
 start_pulseaudio

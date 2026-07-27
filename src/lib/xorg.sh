@@ -53,7 +53,11 @@ _try_start_xorg_on() {
     # block this probe forever and the loop would never reach its kill below.
     timeout 5 xdpyinfo -display "$disp" >/dev/null 2>&1 && return 0
     if ! kill -0 "$xpid" 2>/dev/null; then
-      log "xorg: $disp bind failed (likely owned by foreign X in another ns)"
+      # Two causes look identical from here: a foreign X in another ns holding
+      # the display, or the GPU having no scanout at all ("no screens found").
+      local why="foreign X in another ns"
+      grep -qs 'no screens found' "/var/log/Xorg.${n}.log" && why="'no screens found' — display owned elsewhere, or this GPU has no scanout"
+      log "xorg: $disp bind failed ($why)"
       return 1
     fi
     sleep 0.5
@@ -77,6 +81,49 @@ enable_gpu_persistence() {
   else
     warn "could not enable nvidia persistence mode (-pm 1) â€” continuing"
   fi
+}
+
+# Fail fast on a node whose GPU can't run cs2 at all. Without this the boot looks
+# healthy for ~40s (Xorg quietly falls back to the dummy config, Steam logs in)
+# and only ends in a bare segfault inside librendersystemvulkan. Detection only —
+# every check either dies with a named cause or continues untouched.
+# GS_SKIP_GPU_PREFLIGHT=1 bypasses.
+preflight_gpu() {
+  case "${GS_SKIP_GPU_PREFLIGHT:-0}" in
+    1|on|true|yes) log "gpu preflight: skipped (GS_SKIP_GPU_PREFLIGHT)"; return 0 ;;
+  esac
+
+  # WSL2 hands the GPU through /dev/dxg: no DRM scanout (so the nvidia X always
+  # reports "no screens found") and no Vulkan WSI. cs2 can never run here.
+  local kern; kern=$(uname -r 2>/dev/null)
+  if [ -e /dev/dxg ] || printf '%s' "$kern" | grep -qi 'microsoft\|wsl'; then
+    die "node is WSL2 (kernel '$kern') — the GPU has no DRM scanout and no Vulkan WSI, so cs2 segfaults on renderer init. Keep game-streamer pods off this node (taint / nodeSelector), or set GS_SKIP_GPU_PREFLIGHT=1 to try anyway."
+  fi
+
+  command -v vulkaninfo >/dev/null 2>&1 \
+    || { warn "gpu preflight: vulkaninfo not installed — skipping Vulkan checks"; return 0; }
+
+  local out; out=$(timeout 30 vulkaninfo 2>/dev/null) || true
+  # No parseable output means vulkaninfo itself failed — not evidence against
+  # the node, so don't fail a working pool on it.
+  if ! printf '%s\n' "$out" | grep -q 'Instance Extensions'; then
+    warn "gpu preflight: vulkaninfo returned nothing usable — skipping Vulkan checks"
+    return 0
+  fi
+
+  local ext missing=""
+  for ext in VK_KHR_surface VK_KHR_xlib_surface; do
+    printf '%s\n' "$out" | grep -qE "^[[:space:]]*${ext}[[:space:]]*:" || missing="$missing $ext"
+  done
+  [ -n "$missing" ] && die "Vulkan loader on this node is missing WSI extension(s):${missing}. cs2 can't create a swapchain and will segfault on renderer init (Steam logs 'BInit - Unable to initialize Vulkan'). Check the NVIDIA container runtime / ICD mounts on the node."
+
+  # Only a software device (llvmpipe/lavapipe) → the ICD mount is missing; cs2
+  # either crashes or renders at single-digit fps.
+  if ! printf '%s\n' "$out" | grep -qE 'PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED|VIRTUAL)_GPU'; then
+    die "no hardware Vulkan device on this node (only software rasterizer, if any) — the NVIDIA ICD isn't reaching the pod. Check NVIDIA_DRIVER_CAPABILITIES and the container runtime."
+  fi
+
+  log "gpu preflight: ok (Vulkan WSI + hardware device present)"
 }
 
 # Walk $DISPLAY..+9 trying to start Xorg with the current $XORG_CONFIG. Sets
@@ -131,7 +178,7 @@ start_xorg() {
           *)         dummy_cfg=xorg-coexist-1080p.conf ;;
         esac
       fi
-      log "GPU display owned by another X server (host desktop?) â€” retrying with offscreen dummy X ($dummy_cfg); cs2 renders via the shared GPU render node, vkcapture still captures"
+      log "no screens found on every display — GPU scanout unavailable (owned by a host desktop, or the GPU has none); retrying with offscreen dummy X ($dummy_cfg). cs2 renders via the shared GPU render node and vkcapture still captures, provided the node has hardware Vulkan (see preflight_gpu)"
       export XORG_CONFIG="$dummy_cfg"
       rm -f /var/log/Xorg.*.log 2>/dev/null || true   # clear so a later grep is fresh
       _xorg_try_displays && found="$XORG_FOUND"

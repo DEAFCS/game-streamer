@@ -52,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # GPU userspace (NVIDIA runtime injects the actual driver libs at runtime).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 libglx-mesa0 libegl1 libgles2 \
-      libvulkan1 mesa-vulkan-drivers \
+      libvulkan1 mesa-vulkan-drivers vulkan-tools \
       libasound2t64 libpulse0 pulseaudio pulseaudio-utils
 
 # CS2 runtime text/UI deps (the -dev variants are dropped — only runtime libs).
