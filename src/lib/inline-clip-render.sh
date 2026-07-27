@@ -282,6 +282,15 @@ else
   say "WARN /demo/seek-state probe -> ${SS_PROBE} — spec-server predates it; using /demo/state fallback (restart spec-server)"
 fi
 
+SEEK_STATE_FAST=0
+SS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || echo 000)
+if [ "$SS_PROBE" = "200" ]; then
+  SEEK_STATE_FAST=1
+else
+  say "WARN /demo/seek-state probe -> ${SS_PROBE} — spec-server predates it; using /demo/state fallback (restart spec-server)"
+fi
+
 # "spectated_steam_id|pov_slot|slots_count|tick" from the fast endpoint.
 spec_pov_state() {
   curl --fail --silent --max-time 5 \
@@ -484,7 +493,7 @@ verify_spec_lock() {
       return 0
     fi
   done
-  say "WARN POV still not locked to ${target_sid} (got '${current}') â€” proceeding anyway"
+  say "WARN POV still not locked to ${target_sid} (got '${current}') — proceeding anyway"
   return 1
 }
 
