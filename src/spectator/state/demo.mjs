@@ -3,6 +3,7 @@ import process from "node:process";
 import { DEMO_FILE, DEMO_TICK_RATE, DEMO_TOTAL_TICKS } from "../env.mjs";
 import { run } from "../util/run.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
+import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { gsiState } from "./gsi.mjs";
 import { loadRoundTicks } from "./bindings.mjs";
 
@@ -139,20 +140,19 @@ export function reconcileTickFromGsi(prev) {
     demoState.paused &&
     now - demoState.lastPauseCmdMs > 2_500
   ) {
-    demoState.paused = false;
-    demoState.lastSeekRealMs = now;
-    // Mid-round the round's start tick is the best available re-ground.
-    if (gsiState.mapPhase !== "warmup" && gsiState.roundNumber !== null) {
-      const entry = loadRoundTicks().find(
-        (r) => r.round === gsiState.roundNumber + 1,
-      );
-      if (entry && entry.start_tick > demoState.lastTickAtSeek) {
-        demoState.lastTickAtSeek = entry.start_tick;
-      }
-    }
+    // Re-arm the throttle immediately so a slow cs2 doesn't get spammed
+    // with pause retries every GSI tick (~10Hz) while this settles.
+    notePauseCommanded();
     process.stderr.write(
-      "[spec-server] pause desync: demo time advancing while paused=true — adopting playing\n",
+      "[spec-server] pause desync: demo time advancing while paused=true — re-sending demo_pause\n",
     );
+    void execCfgCommand("demo_pause").then((ok) => {
+      if (!ok) {
+        process.stderr.write(
+          "[spec-server] pause desync: demo_pause re-send failed — cs2 not running?\n",
+        );
+      }
+    });
   }
 
   const enteredFreezetime =

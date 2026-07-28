@@ -938,11 +938,12 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   spec_post /demo/toggle '{}'
 
   # Re-press POV after play; the re-seek reset it and the pre-play re-press
-  # no-ops while paused. observer_slot may also have shifted.
+  # no-ops while paused. observer_slot may also have shifted. Verify via
+  # GSI like STEP 4b instead of a fire-and-forget spec_post -- a silently
+  # missed re-press here is what caused the wrong-POV ("mouse bug") clips.
   if [ -n "${SEG_POV_STEAMID:-}" ]; then
-    POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
-    say "STEP 5: re-press slot=${POV_SLOT_AFTER_PLAY:-NONE}; GSI spectated=$(gsi_spectated_steamid)"
-    [ -n "$POV_SLOT_AFTER_PLAY" ] && spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
+    verify_spec_lock "$SEG_POV_STEAMID" || true
+    say "STEP 5: after re-lock, GSI spectated=$(gsi_spectated_steamid)"
   fi
   log_spec_slots "after-play"
 
