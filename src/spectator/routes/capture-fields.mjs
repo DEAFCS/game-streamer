@@ -1,5 +1,5 @@
 import { gsiState } from "../state/gsi.mjs";
-import { estimateCurrentTick } from "../state/demo.mjs";
+import { estimateCurrentTick, isSeeking } from "../state/demo.mjs";
 
 // In-process replacement for `GET /demo/state | clip-helpers.mjs
 // capture-fields` — the clip capture loop polls this at ~6Hz, and the
@@ -69,6 +69,23 @@ export async function povStateHandler(req, res) {
   const t = estimateCurrentTick();
   const tick = typeof t === "number" && Number.isFinite(t) ? String(Math.floor(t)) : "?";
   const body = Buffer.from([spectated, slot, slots, tick].join("|"));
+  res.writeHead(200, {
+    "Content-Type": "text/plain",
+    "Content-Length": String(body.length),
+  });
+  res.end(body);
+}
+
+// "seeking|tick|round_number" — polled by the clip renderer between issuing a
+// seek and starting capture. A separate endpoint on purpose: /demo/pov-state is
+// parsed positionally from the END of the line, and /demo/capture-fields is
+// contractually byte-identical to the clip-helpers.mjs fallback, so appending a
+// field to either silently breaks its consumers.
+export async function seekStateHandler(_req, res) {
+  const t = estimateCurrentTick();
+  const tick = typeof t === "number" && Number.isFinite(t) ? String(Math.floor(t)) : "?";
+  const round = typeof gsiState.roundNumber === "number" ? String(gsiState.roundNumber) : "";
+  const body = Buffer.from([isSeeking() ? "1" : "0", tick, round].join("|"));
   res.writeHead(200, {
     "Content-Type": "text/plain",
     "Content-Length": String(body.length),

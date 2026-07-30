@@ -44,19 +44,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   xwininfo  — used to detect when the CS2 window appears
 #   zenity    — Steam's bootstrap shells out to it for error popups; without
 #               it Steam crashes hard on certain failure paths
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       xserver-xorg-core xserver-xorg-legacy xserver-xorg-video-dummy \
       xinit x11-xserver-utils xauth xdotool x11-utils \
       openbox dbus dbus-x11 zenity
 
 # GPU userspace (NVIDIA runtime injects the actual driver libs at runtime).
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 libglx-mesa0 libegl1 libgles2 \
       libvulkan1 mesa-vulkan-drivers \
       libasound2t64 libpulse0 pulseaudio pulseaudio-utils
 
 # CS2 runtime text/UI deps (the -dev variants are dropped — only runtime libs).
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 \
       libfontconfig1 libfreetype6 libharfbuzz0b \
       libxrandr2 libxinerama1 libxi6 libxxf86vm1 libxcursor1 \
@@ -70,7 +70,7 @@ RUN apt-get install -y --no-install-recommends \
 #   plugins-ugly — provides x264enc as a software fallback when NVENC fails
 #   libav — avenc_aac for the audio leg
 #   python3 — used by lib/steam.sh (libraryfolders.vdf manipulation)
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       gstreamer1.0-tools \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
@@ -87,7 +87,7 @@ RUN apt-get install -y --no-install-recommends \
 # videoconvert path (the cs2 firefight-judder source). Installed from the
 # CUDA apt repo already configured in the base image; the version component
 # must match the base (12.6 -> cuda-nvrtc-12-6).
-RUN apt-get install -y --no-install-recommends cuda-nvrtc-12-6 \
+RUN apt-get update && apt-get install -y --no-install-recommends cuda-nvrtc-12-6 \
  && ln -sf libnvrtc.so.12 \
       /usr/local/cuda/targets/x86_64-linux/lib/libnvrtc.so \
  && ldconfig
@@ -129,7 +129,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # 32-bit libs required by the Steam client (Steam UI is 32-bit; CS2 itself
 # is 64-bit but the launcher path needs the 32-bit stack to run).
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       lib32gcc-s1 libc6-i386 \
       libsdl2-2.0-0:i386 libncurses6:i386 \
       libxtst6:i386 libx11-6:i386 libxext6:i386 libxrandr2:i386 \
@@ -153,7 +153,7 @@ RUN apt-get install -y --no-install-recommends \
 #   libnotify4       — Electron Notification API
 #   libdrm2          — DRM, often picked up by the GPU stack already but
 #                      list explicitly so we don't depend on transitive pulls
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       picom wmctrl \
       libgtk-3-0t64 libxshmfence1 libsecret-1-0 libnotify4 libdrm2
 # 32-bit Steam UI deps. steamui.so is 32-bit and uses dlmopen() to load
@@ -162,7 +162,7 @@ RUN apt-get install -y --no-install-recommends \
 # through to the system loader. Without these the system has only the
 # 64-bit equivalents and the load fails with "wrong ELF class:
 # ELFCLASS64" -> Steam exits before webhelper spawns.
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
       libglib2.0-0:i386 libgtk2.0-0:i386 libgdk-pixbuf-2.0-0:i386 \
       libpango-1.0-0:i386 libpangocairo-1.0-0:i386 libpangoft2-1.0-0:i386 \
       libcairo2:i386 libatk1.0-0:i386 \

@@ -148,6 +148,15 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: /demo/state] -> "1" while a gototick is still settling, else "0".
+  // Absent on a spec-server that predates the field; "0" then keeps the caller
+  // on its old no-wait behaviour rather than blocking for the full timeout.
+  case "state-seeking": {
+    const d = readStdinJson();
+    process.stdout.write(d?.seeking === true ? "1" : "0");
+    break;
+  }
+
   // [stdin: /demo/state] -> gsi.map_phase (live / gameover / ...), or empty.
   case "state-map-phase": {
     const d = readStdinJson();
@@ -385,23 +394,24 @@ switch (subcmd) {
     break;
   }
 
-  // [stdin: CLIP_SEGMENTS] -> one "start|end|accountid" line per segment,
-  // so the segment loop spawns node ONCE up front instead of 3x per
-  // segment. All values numeric (accountid empty when missing/invalid),
-  // so the line protocol is injection-safe.
+  // [stdin: CLIP_SEGMENTS] -> one "start|end|accountid|killtick" line per
+  // segment, so the segment loop spawns node ONCE up front instead of 3x per
+  // segment. All values numeric (accountid/killtick empty when missing or
+  // invalid), so the line protocol is injection-safe.
   case "segs-table": {
     const d = readStdinJson();
     if (!Array.isArray(d)) break;
     for (const s of d) {
       const start = typeof s?.start_tick === "number" ? String(Math.floor(s.start_tick)) : "";
       const end = typeof s?.end_tick === "number" ? String(Math.floor(s.end_tick)) : "";
+      const kill = typeof s?.kill_tick === "number" ? String(Math.floor(s.kill_tick)) : "";
       let aid = "";
       const sid = s?.pov_steam_id;
       if (typeof sid === "string" && /^\d+$/.test(sid)) {
         const a = BigInt(sid) - STEAMID64_BASE;
         if (a > 0n) aid = a.toString();
       }
-      process.stdout.write(`${start}|${end}|${aid}\n`);
+      process.stdout.write(`${start}|${end}|${aid}|${kill}\n`);
     }
     break;
   }

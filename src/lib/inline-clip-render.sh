@@ -273,10 +273,100 @@ else
   say "WARN /demo/pov-state probe -> ${PS_PROBE} â€” spec-server predates it; using node fallback (restart spec-server)"
 fi
 
+SEEK_STATE_FAST=0
+SS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || echo 000)
+if [ "$SS_PROBE" = "200" ]; then
+  SEEK_STATE_FAST=1
+else
+  say "WARN /demo/seek-state probe -> ${SS_PROBE} — spec-server predates it; using /demo/state fallback (restart spec-server)"
+fi
+
 # "spectated_steam_id|pov_slot|slots_count|tick" from the fast endpoint.
 spec_pov_state() {
   curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL}/demo/pov-state?pov=${1:-}" || true
+}
+
+# "1" while cs2 is still executing a demo_gototick, else "0" (also "0" when the
+# spec-server is unreachable — never block the render on a dead probe).
+seek_in_progress() {
+  local line
+  if [ "$SEEK_STATE_FAST" = "1" ]; then
+    line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+    printf '%s' "${line%%|*}"
+    return
+  fi
+  spec_get_state | node "$CLIP_HELPERS" state-seeking 2>/dev/null || printf '0'
+}
+
+# Block until cs2 has actually ARRIVED at the last requested tick.
+# /demo/seek returns 200 as soon as the gototick is QUEUED — the command itself
+# is asynchronous and slow: forward seeks stall ~2s and backward seeks replay
+# from tick 0, which is the case every segment hits. Starting capture and
+# pressing play against a still-sweeping demo spent the whole 3s pre-kill lead
+# before the playhead was even at the lead, so clips opened on the kill.
+# Motion is NOT a usable arrival signal here — during the backward replay sweep
+# the world is moving and the round clock is ticking, so a motion check reports
+# "playing" while cs2 is still mid-sweep.
+# Returns 0 on confirmed arrival, 1 on timeout (caller proceeds — a late clip
+# beats no clip). Costs nothing in the output: the demo is paused and capture
+# has not started, so no frames are produced while we wait.
+wait_seek_settled() {
+  local label="${1:-seek}"
+  local timeout_ms="${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}"
+  local waited=0
+  while [ "$waited" -lt "$timeout_ms" ]; do
+    if [ "$(seek_in_progress)" != "1" ]; then
+      [ "$waited" -gt 0 ] && say "  ${label}: seek settled after ${waited}ms"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 100))
+  done
+  say "WARN ${label}: seek still settling after ${timeout_ms}ms — proceeding anyway"
+  return 1
+}
+
+# "phase_ends|world_motion" — the GSI fields that advance only while the demo is
+# actually rolling. Returns 1 (empty) when GSI is stale, so callers can tell
+# "no signal" apart from "not moving yet".
+playback_sig() {
+  local line _p _pe _mo _age _mp _rn _pk
+  if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
+    line=$(curl --fail --silent --max-time 5 \
+      "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true)
+  else
+    line=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true)
+  fi
+  IFS='|' read -r _p _pe _mo _age _mp _rn _pk <<<"$line"
+  { [ -n "$_age" ] && [ "$_age" -le 750 ]; } 2>/dev/null || return 1
+  printf '%s|%s' "$_pe" "$_mo"
+}
+
+# Block until the demo is demonstrably MOVING after the unpause. cs2 holds the
+# paused frame for a while after a big backward seek, and the capture is already
+# armed by then — those held frames are what made clips open on a second of
+# statues. Unlike the arrival check this runs with playback requested, so the
+# signal is unambiguous: either field changing means frames are worth recording.
+# Returns 0 on confirmed motion, 1 on timeout (caller opens the gate anyway).
+wait_playback_moving() {
+  local baseline="$1"
+  # Generous by design: while the demo is still frozen no demo time is passing, so
+  # holding the gate costs nothing, and the post-seek stall this covers runs ~2s.
+  local timeout_ms="${CLIP_PLAY_CONFIRM_TIMEOUT_MS:-2500}"
+  local waited=0 sig
+  while [ "$waited" -lt "$timeout_ms" ]; do
+    sig=$(playback_sig "${SEG_POV_STEAMID:-}") || sig=""
+    if [ -n "$sig" ] && [ "$sig" != "$baseline" ]; then
+      say "STEP 5: playback moving after ${waited}ms"
+      return 0
+    fi
+    sleep 0.05
+    waited=$((waited + 50))
+  done
+  say "WARN playback not confirmed moving within ${timeout_ms}ms — recording anyway"
+  return 1
 }
 
 log_state() {
@@ -395,33 +485,6 @@ verify_spec_lock() {
     fi
   done
   say "WARN POV still not locked to ${target_sid} (got '${current}') â€” proceeding anyway"
-  return 1
-}
-
-# Confirm cs2 actually resumed playback by watching for tick advance.
-# The wallclock loop counts real time from the moment we think play
-# started â€” if the resume cfg never landed (focus race, demoui repaint,
-# cs2 mid-seek), the gst capture writes the frozen frame for the entire
-# segment duration. Caller is expected to retry resume on failure.
-verify_play_resumed() {
-  local baseline_tick="$1"
-  # ~2s deadline matches the old 6-iter loop's effective span (node
-  # spawn per poll).
-  local s tick line start=$SECONDS
-  while [ $((SECONDS - start)) -lt 2 ]; do
-    sleep 0.1
-    if [ "$POV_STATE_FAST" = "1" ]; then
-      line=$(spec_pov_state)
-      tick="${line##*|}"
-    else
-      s=$(spec_get_state || true)
-      [ -z "$s" ] && continue
-      tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
-    fi
-    if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ] 2>/dev/null; then
-      return 0
-    fi
-  done
   return 1
 }
 
@@ -795,9 +858,9 @@ VKCAP_FELL_BACK=0
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
 # target gets overridden â€” otherwise the clip opens on whoever cs2 was
 # last spectating, producing the wrong POV.
-declare -a SEG_STARTS=() SEG_ENDS=() SEG_POVS=()
-while IFS='|' read -r _s _e _a; do
-  SEG_STARTS+=("$_s"); SEG_ENDS+=("$_e"); SEG_POVS+=("$_a")
+declare -a SEG_STARTS=() SEG_ENDS=() SEG_POVS=() SEG_KILLS=()
+while IFS='|' read -r _s _e _a _k; do
+  SEG_STARTS+=("$_s"); SEG_ENDS+=("$_e"); SEG_POVS+=("$_a"); SEG_KILLS+=("$_k")
 done < <(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-table)
 
 # Snapshot console.log size before any seek so we only match a fatal from this render.
@@ -840,6 +903,7 @@ warm_pipelines_if_cold() {
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/speed  '{"rate": 1}'
   spec_post /demo/seek   "{\"tick\": ${start}}"
+  wait_seek_settled "WARM-UP seek-back" || true
   mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
   : > "$WARM_MARKER"
   say "WARM-UP: done â€” pipelines warmed for this cs2 process"
@@ -866,6 +930,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_FILE="${SEG_DIR}/seg-$(printf '%03d' "$SEG_IDX").mp4"
   say "------- SEGMENT $((SEG_IDX + 1))/${SEG_COUNT}: ticks=${SEG_START}..${SEG_END} (${SEG_DURATION_MS}ms)"
 
+  # Expected pre-kill lead, so the "KILL seg$N ... at +Nms played" line below can
+  # be compared against what the API actually asked for instead of eyeballed.
+  SEG_KILL_TICK="${SEG_KILLS[$SEG_IDX]:-}"
+  SEG_LEAD_MS=""
+  if [ -n "$SEG_KILL_TICK" ] && [ "$SEG_KILL_TICK" -gt "$SEG_START" ] 2>/dev/null; then
+    SEG_LEAD_MS=$(awk -v t="$((SEG_KILL_TICK - SEG_START))" -v r="${CLIP_TICK_RATE:-64}" \
+      'BEGIN{printf "%d", t / r * 1000}')
+    say "  expected pre-kill lead: ${SEG_LEAD_MS}ms (kill_tick=${SEG_KILL_TICK})"
+  fi
+
   # Warm the Vulkan pipelines once, BEFORE the seek/lead-in, so the warm's
   # backward seek is absorbed by STEP 2/3/4 before capture (see the function note).
   warm_pipelines_if_cold "$SEG_START" "$SEG_DURATION_MS"
@@ -874,6 +948,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   spec_post /demo/pause '{"force": true}'
   say "STEP 3: seek to $SEG_START"
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
+  wait_seek_settled "STEP 3" || true
 
   # Lead-in: unpause so cs2 processes the seek + the spec lock (spec
   # commands no-op while paused). toggle reliably flips state; demo_resume
@@ -901,6 +976,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
   # Never record at an inherited timescale â€” stale 2x/4x = double-speed clips.
   spec_post /demo/speed '{"rate": 1}'
+  # The lead-in above played for 0.6s + the POV lock's polling, so this is a
+  # LARGE backward seek — the slowest kind. Everything below (capture spawn,
+  # play, wall-clock billing) assumes the playhead is at SEG_START, so wait for
+  # it rather than the old fixed 0.2s.
+  wait_seek_settled "STEP 4d re-seek" || true
   sleep 0.2
 
   # Re-press slot before capture (re-seek reset POV); queued for play.
@@ -918,16 +998,21 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # Recording therefore opens exactly at the pre-roll â€” previously we played
   # first and only started capturing after wait-advancing + POV re-press + the
   # ~0.3s gst spawn, during which the demo drifted ~1-2s past SEG_START and ate
-  # most of the 3s lead (the kill landed almost immediately). The only frames
-  # recorded before playback are the brief held SEG_START frame (gst spawn + the
-  # documented post-seek stall); they sit at the very top of the lead-in and
-  # STEP 7's phase-clock freeze-withholding keeps them from being billed, so the
-  # full pre-roll still plays before the kill.
+  # most of the 3s lead (the kill landed almost immediately). The capture arms
+  # here but records nothing yet — it holds every frame until STEP 5 confirms the
+  # demo is moving and opens its gate, so the SEG_START frame cs2 holds while it
+  # digests a big backward unpause never reaches the mp4 (clips opened on a second
+  # of statues). The ximagesrc fallback has no gate and still records it.
   say "STEP 6: start capture (paused at $SEG_START) -> $SEG_FILE"
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
+  # Spawning the capture is not the same as recording it: on the vkcapture path
+  # cs2's obs-vkcapture layer retries connect() on a 1s cadence and the swapchain
+  # handshake follows, so the first buffer can be ~0.5-2s out. Playing before
+  # then fed the pre-kill lead into a pipeline that recorded none of it.
+  wait_clip_capture_ready || true
   start_capture_diag "${CLIP_CAPTURE_PID:-}"
 
   # Force-pause then toggle â†’ deterministic PLAYING (a bare relative toggle
@@ -935,7 +1020,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 5: PRESS PLAY (force-pause then toggle)"
   spec_post /demo/pause '{"force": true}'
   sleep 0.15
+  PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}") || PLAY_SIG_BEFORE=""
   spec_post /demo/toggle '{}'
+
+  # The capture is armed but holding: open its gate only once the demo is really
+  # rolling, so the clip opens on motion instead of on the frame cs2 holds while it
+  # digests the unpause. Skipped when GSI is stale — with no signal to wait for,
+  # blocking would just hold the gate through the whole timeout.
+  if [ -n "$PLAY_SIG_BEFORE" ]; then
+    wait_playback_moving "$PLAY_SIG_BEFORE" || true
+  else
+    say "STEP 5: GSI stale — opening the capture gate without a motion check"
+  fi
+  clip_capture_go
 
   # Re-press POV after play; the re-seek reset it and the pre-play re-press
   # no-ops while paused. observer_slot may also have shifted. Verify via
@@ -1029,15 +1126,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # verify the kill lands ~lead into the clip. (Detection only â€” no behavior.)
     if [ -n "$POV_KILLS" ]; then
       if [ -n "$LAST_POV_KILLS" ] && [ "$POV_KILLS" -gt "$LAST_POV_KILLS" ]; then
-        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, clock=${PHASE_ENDS:-?})"
+        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, expected ${SEG_LEAD_MS:-?}ms, clock=${PHASE_ENDS:-?})"
       fi
       LAST_POV_KILLS="$POV_KILLS"
     fi
 
-    # Withhold a poll's time ONLY on a real freeze: the GSI phase clock flat in
-    # a live round means demo playback stalled (not a player hold). Capped so a
-    # missing/odd phase clock can't stretch the tail.
-    if [ "$PHASE" = "live" ] && [ -n "$PHASE_ENDS" ] && [ "$PHASE_ENDS" = "$LAST_PHASE_ENDS" ] \
+    # Withhold a poll's time ONLY on a real freeze: a flat GSI phase clock means
+    # demo playback stalled (not a player hold). Capped so a missing/odd phase
+    # clock can't stretch the tail.
+    # Any real phase, not just "live": a 3s pre-roll routinely sits in freezetime
+    # or the previous round's "over" aftermath, and restricting the withholding
+    # to "live" billed post-seek stalls there at full rate — straight out of the
+    # lead. A non-empty PHASE still excludes stale GSI.
+    if [ -n "$PHASE" ] && [ -n "$PHASE_ENDS" ] && [ "$PHASE_ENDS" = "$LAST_PHASE_ENDS" ] \
        && [ "$UNBILLED_MS" -lt "$CLIP_UNBILLED_CAP_MS" ]; then
       UNBILLED_MS=$((UNBILLED_MS + DELTA_MS))
       FREEZE_STREAK=$((FREEZE_STREAK + 1))

@@ -122,6 +122,24 @@ struct state {
     GstPad     *hud_pad;
     char       *hud_ctl_path;
     int         hud_visible;      // last applied (1 visible / 0 hidden)
+
+    // VKCAP_READY_FILE: touched the instant the shared texture is mapped, i.e. the
+    // consumer is ARMED and one gate-open away from recording. The caller starts the
+    // demo playing only once this exists — the layer retries connect() on a 1s
+    // cadence, so a fresh consumer can be several hundred ms from recording anything,
+    // and anything played before then is simply not in the mp4.
+    char       *ready_path;
+    bool        ready_signalled;
+    bool        pushed_first;
+
+    // VKCAP_START_FILE: when set, an armed consumer holds the pipeline in READY —
+    // discarding cs2's frames — until this file appears. The clip renderer opens the
+    // gate once the demo is confirmed MOVING, so the mp4 doesn't open on the held
+    // paused frame. Unset => arm and record immediately (old behaviour).
+    char       *start_path;
+    bool        started;
+    gint64      armed_us;         // g_get_monotonic_time() when we armed
+    int         start_timeout_ms; // open the gate anyway after this (0 = never)
 };
 
 static struct state st = { .listen_fd = -1, .client_fd = -1, .present_efd = -1 };
@@ -323,15 +341,58 @@ static bool frame_is_black(const uint8_t *p, int stride, int height)
     return n > 0 && (lit * 1000) < n;            // < 0.1% of sampled pixels lit
 }
 
+// Armed: the shared texture is mapped and frames are arriving, so the caller can
+// safely start the demo — the only thing left is opening the start gate.
+static void signal_armed(void)
+{
+    if (st.ready_signalled) return;
+    st.ready_signalled = true;
+    st.armed_us = g_get_monotonic_time();
+    if (st.ready_path) {
+        FILE *f = fopen(st.ready_path, "w");
+        if (f) {
+            fclose(f);
+        } else {
+            log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
+        }
+    }
+    log_msg("armed%s", st.start_path ? " — holding for start gate" : "");
+}
+
+// True once the pipeline is allowed to record. Without VKCAP_START_FILE that is
+// immediately; with it, when the renderer touches the file (or the timeout fires,
+// so a renderer that never opens the gate degrades to a late clip, not an empty one).
+static bool start_gate_open(void)
+{
+    if (st.started) return true;
+    if (!st.start_path) { st.started = true; return true; }
+    if (st.armed_us == 0) st.armed_us = g_get_monotonic_time();
+    const gint64 waited_ms = (g_get_monotonic_time() - st.armed_us) / 1000;
+    if (access(st.start_path, F_OK) == 0) {
+        st.started = true;
+        log_msg("start gate opened after %" G_GINT64_FORMAT "ms armed — recording", waited_ms);
+    } else if (st.start_timeout_ms > 0 && waited_ms >= st.start_timeout_ms) {
+        st.started = true;
+        log_msg("WARN: start gate never opened within %dms — recording anyway", st.start_timeout_ms);
+    }
+    return st.started;
+}
+
 // Build a buffer from the current shared frame (or repeat the last good frame
 // while the layer is transiently gone) and push it into the pipeline. Shared by
 // the fps timer (on_tick) and the per-present signal (on_present_signal).
 // Returns false to stop the main loop.
 static bool push_one_frame(void)
 {
-    // Push only once PLAYING (delayed to the first frame so pulsesrc audio starts
-    // in lockstep with video).
-    if (!st.playing || !st.appsrc) return true;
+    if (!st.appsrc) return true;
+    // Hold in READY until we have a frame AND the gate is open, then go PLAYING so
+    // the pulsesrc audio starts in lockstep with the first recorded video frame.
+    if (!st.playing) {
+        if (!st.have_frame || !start_gate_open()) return true;
+        gst_element_set_state(st.pipeline, GST_STATE_PLAYING);
+        st.playing = true;
+        return true;   // push from the next tick/present, as before
+    }
 
     GstBuffer *out = NULL;
 
@@ -415,6 +476,7 @@ static bool push_one_frame(void)
         g_main_loop_quit(st.loop);
         return false;
     }
+    if (!st.pushed_first) { st.pushed_first = true; log_msg("first frame pushed — recording"); }
     return true;
 }
 
@@ -597,11 +659,10 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
             st.have_frame = true;
             log_msg("shared texture ready: %dx%d, sampling at %dfps", st.width, st.height, st.fps);
         }
-        // Go PLAYING now so audio (pulsesrc) starts in lockstep with video.
-        if (!st.playing) {
-            gst_element_set_state(st.pipeline, GST_STATE_PLAYING);
-            st.playing = true;
-        }
+        // Armed. push_one_frame flips the pipeline to PLAYING on the next tick /
+        // present once the start gate is open, so audio starts with the first
+        // recorded frame rather than with the layer handshake.
+        signal_armed();
         break;
     }
     default:
@@ -728,6 +789,9 @@ int main(int argc, char **argv)
     // Black-frame hold defaults ON (host-map/composite path only — needs pixel
     // access; the zero-copy clip path doesn't read pixels). VKCAP_BLACK_HOLD=0 off.
     { const char *z = getenv("VKCAP_BLACK_HOLD"); st.hold_black = !z || atoi(z) != 0; }
+    { const char *p = getenv("VKCAP_READY_FILE"); st.ready_path = (p && *p) ? (char *)p : NULL; }
+    { const char *p = getenv("VKCAP_START_FILE"); st.start_path = (p && *p) ? (char *)p : NULL; }
+    { const char *t = getenv("VKCAP_START_TIMEOUT_MS"); st.start_timeout_ms = t ? atoi(t) : 10000; }
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {

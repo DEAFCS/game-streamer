@@ -8,7 +8,7 @@ import {
 // Oxanium — the 5stack brand font, copied from web/public/fonts.
 // Variable weight 100-700, used across the web app via
 // tailwind.config.js → fontFamily.sans.
-const handle = delayRender("Loading Oxanium");
+const handle = delayRender("Loading Oxanium", { retries: 2 });
 
 const font = new FontFace(
   "Oxanium",

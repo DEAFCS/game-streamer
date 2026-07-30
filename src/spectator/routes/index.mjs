@@ -4,7 +4,11 @@ import { readJsonBody, sendJson } from "../util/http.mjs";
 
 import { healthHandler } from "./health.mjs";
 import { demoStateHandler } from "./demo-state.mjs";
-import { captureFieldsHandler, povStateHandler } from "./capture-fields.mjs";
+import {
+  captureFieldsHandler,
+  povStateHandler,
+  seekStateHandler,
+} from "./capture-fields.mjs";
 import { gsiHandler } from "./gsi.mjs";
 import {
   autodirectorHandler,
@@ -43,6 +47,7 @@ const ROUTES = new Map([
   ["GET /demo/state", demoStateHandler],
   ["GET /demo/capture-fields", captureFieldsHandler],
   ["GET /demo/pov-state", povStateHandler],
+  ["GET /demo/seek-state", seekStateHandler],
   ["POST /gsi", gsiHandler],
 
   ["POST /spec/click",        clickHandler],
@@ -120,6 +125,7 @@ export async function dispatch(req, res) {
 // per-request lines just drown the log.
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
+  "/demo/seek-state",
 ]);
 
 function logResponse(method, url, res) {
