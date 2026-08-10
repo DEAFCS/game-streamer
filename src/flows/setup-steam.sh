@@ -80,8 +80,9 @@ write_steam_dev_cfg   # pin fossilize fork count to the pod's cores
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
 
-# Steam OFF so steamcmd and Steam don't fight over appmanifest. A fresh install
-# re-registers the library at the end â€” see install_cs2_via_steamcmd.
+# Steam OFF so steamcmd and Steam don't fight over appmanifest. Installs CS2
+# when missing, else updates it — Steam must never need its own "must be
+# updated" flow at applaunch (it wedges). Re-registers the library after.
 install_cs2_via_steamcmd
 
 # Warm boot = userdata + loginusers.vdf cached â†’ Steam reuses the

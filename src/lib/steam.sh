@@ -199,9 +199,9 @@ _emit_cs2_progress_from_stdin() {
 }
 
 # Install CS2 via steamcmd directly into the configured library when
-# the install is missing. Skips when an appmanifest already exists â€”
-# our game-server runs on a fixed CS2 build, so leaving warm pods on
-# whatever buildid was first installed keeps client/server in sync.
+# the install is missing; when already installed, run an update pass
+# instead (update_cs2_via_steamcmd) so Steam never has to self-update
+# CS2 at -applaunch time — that path wedges on "must be updated".
 #
 # Runs against $STEAM_LIBRARY (not the default ~/.local/share/Steam) by
 # passing +force_install_dir, so the install lands inside our registered
@@ -216,9 +216,7 @@ install_cs2_via_steamcmd() {
   local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 
   if [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
-    local bid
-    bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
-    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) â€” skip steamcmd"
+    update_cs2_via_steamcmd "$manifest"
     return 0
   fi
 
@@ -300,6 +298,74 @@ install_cs2_via_steamcmd() {
   fi
 
   die "steamcmd finished but no $manifest â€” install failed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
+}
+
+# Bring an existing CS2 install up to date via steamcmd BEFORE Steam
+# boots. Steam refuses -applaunch on an out-of-date app and its own
+# "CS2 must be updated" flow sometimes wedges, so updating here (Steam
+# off) means the client sees a current install and launches straight
+# away. No `validate` — that re-hashes ~57 GB; steamcmd's buildid check
+# is a fast no-op when current. Non-fatal on failure: warn and let
+# Steam's own updater try, i.e. the pre-existing behaviour.
+# CS2_UPDATE_ON_BOOT=0 restores the old skip-if-installed behaviour.
+update_cs2_via_steamcmd() {
+  local manifest="${1:?manifest path required}"
+
+  if [ "${CS2_UPDATE_ON_BOOT:-1}" != "1" ]; then
+    log "CS2_UPDATE_ON_BOOT=0 — skipping CS2 update check"
+    return 0
+  fi
+  if [ ! -x /opt/steamcmd/steamcmd.sh ]; then
+    warn "steamcmd missing — skipping CS2 update check (Steam will self-update)"
+    return 0
+  fi
+
+  local old_bid
+  old_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
+    | grep -oE '[0-9]+' | head -1 || true)
+  log "CS2 installed (buildid ${old_bid:-unknown}) — running steamcmd update check"
+
+  # steamcmd expects the manifest inside the install dir (we lift it to
+  # the library root post-install for Steam). Seed a copy so it sees the
+  # installed state and downloads only the delta — without it steamcmd
+  # treats the install as missing and redownloads everything.
+  mkdir -p "$CS2_DIR/steamapps"
+  cp -f "$manifest" "$CS2_DIR/steamapps/appmanifest_730.acf"
+
+  local steamcmd_log="$LOG_DIR/steamcmd-cs2-update.log"
+  : > "$steamcmd_log"
+  /opt/steamcmd/steamcmd.sh \
+    +@sSteamCmdForcePlatformType linux \
+    +force_install_dir "$CS2_DIR" \
+    +login "$STEAM_USER" "$STEAM_PASSWORD" \
+    +app_update 730 \
+    +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
+
+  if ! grep -qE "Success! App '730' (fully installed|already up to date)" "$steamcmd_log"; then
+    warn "steamcmd update pass did not confirm success — continuing; Steam will self-update if needed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
+    return 0
+  fi
+
+  # Lift the (possibly updated) manifest back to the library root, same
+  # as the fresh-install path.
+  if [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
+    mv -f "$CS2_DIR/steamapps/appmanifest_730.acf" "$manifest"
+    rmdir "$CS2_DIR/steamapps" 2>/dev/null || true
+    sed -i 's|"installdir"[[:space:]]*"[^"]*"|"installdir"\t\t"Counter-Strike Global Offensive"|' \
+      "$manifest"
+  fi
+
+  local new_bid
+  new_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
+    | grep -oE '[0-9]+' | head -1 || true)
+  if [ -n "$new_bid" ] && [ "$new_bid" != "$old_bid" ]; then
+    log "CS2 updated: buildid ${old_bid:-unknown} -> $new_bid"
+  else
+    log "CS2 already up to date (buildid ${new_bid:-${old_bid:-unknown}})"
+  fi
+
+  # steamcmd can rewrite libraryfolders.vdf — re-register ours (idempotent).
+  register_library "$STEAM_LIBRARY"
 }
 
 # Joins the last few non-empty lines with ` | ` for embedding in die().
@@ -1429,8 +1495,9 @@ wait_for_steam_pipe() {
   done
 }
 
-# Report status=validating while Steam verifies 730 game files (no % â€” CEF-only).
-# Parsed from content_log.txt. Returns 0 while validating, else 1.
+# Report 730 update activity Steam is doing itself (verify → validating,
+# active download/apply → downloading_cs2). Parsed from content_log.txt.
+# Returns 0 while in flight (wait loop holds the launch open), else 1.
 _VALIDATE_LOG_OFFSET=0
 _VALIDATE_LAST=""
 _validate_log_file() { printf '%s/logs/content_log.txt' "${STEAM_HOME:-/root/.local/share/Steam}"; }
@@ -1456,6 +1523,18 @@ validate_report_progress() {
         _VALIDATE_LAST="validating"
         log "validating CS2 game files (Steam integrity check)"
         report_status status=validating >/dev/null 2>&1 || true
+      fi
+      return 0 ;;
+    *Downloading*|*Staging*|*Committing*|*Preallocating*)
+      # Steam is actively applying a CS2 update itself (steamcmd pre-update
+      # missed it or a build shipped mid-boot) — hold the launch open.
+      # Bare "Update Required/Queued/Paused" deliberately does NOT hold:
+      # that's the stuck state, and the re-applaunch nudge is what makes
+      # Steam actually start the update.
+      if [ "$_VALIDATE_LAST" != "updating" ]; then
+        _VALIDATE_LAST="updating"
+        log "Steam is downloading a CS2 update"
+        report_status status=downloading_cs2 >/dev/null 2>&1 || true
       fi
       return 0 ;;
     *)
