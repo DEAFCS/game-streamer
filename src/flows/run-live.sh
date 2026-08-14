@@ -246,6 +246,11 @@ done
   die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
 }
 
+# minimize+trim just destroyed the windows holding X input focus and there's no
+# WM to reassign it, so every XTest keystroke would land nowhere until something
+# focuses cs2. windowfocus is XSetInputFocus — it does NOT restack over the HUD.
+timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
+
 # Bring the HUD overlay over cs2 BEFORE the first capture frame goes
 # out. setup-steam.sh's cfg-prep already fired /api/overlay/start once
 # the seed completed (during steam-login) so the bundle is most likely

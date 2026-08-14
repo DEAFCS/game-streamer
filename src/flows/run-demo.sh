@@ -338,6 +338,11 @@ done
   die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
 }
 
+# minimize+trim just destroyed the windows holding X input focus and there's no
+# WM to reassign it, so every XTest keystroke would land nowhere until something
+# focuses cs2. windowfocus is XSetInputFocus — it does NOT restack over the HUD.
+timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
+
 if hud_running; then
   # Forward HUD_MODE as the variant â€” omitting it resets the boot-
   # time variant the auto-overlay set.

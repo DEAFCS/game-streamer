@@ -3,9 +3,7 @@ import process from "node:process";
 
 import { EXEC_CFG_KEY } from "../constants.mjs";
 import { EXEC_CFG_PATH } from "../env.mjs";
-import { run } from "../util/run.mjs";
-import { findCs2Window } from "./window.mjs";
-import { sendConsoleCommand } from "./input.mjs";
+import { sendConsoleCommand, sendKey } from "./input.mjs";
 
 // Serialized so two in-flight calls can't race the cfg rename
 // against BACKSPACE delivery and have cs2 read the wrong contents.
@@ -25,7 +23,6 @@ export async function execCfgCommand(cmd) {
 
 async function execCfgCommandImpl(cmd) {
   if (!EXEC_CFG_PATH) return sendConsoleCommand(cmd);
-  if ((await findCs2Window()) === null) return false;
   // One cmd per line — `;`-joined lines get mis-parsed across cs2 builds.
   const lines = cmd.split(";").map((s) => s.trim()).filter(Boolean);
   const body = lines.join("\n") + "\n";
@@ -39,6 +36,7 @@ async function execCfgCommandImpl(cmd) {
     );
     return sendConsoleCommand(cmd);
   }
-  await run(["xdotool", "key", "--clearmodifiers", EXEC_CFG_KEY]);
-  return true;
+  // Via sendKey so the flush key gets the same focus recovery as every other
+  // input path — a raw xdotool key silently no-ops when focus has drifted.
+  return sendKey(EXEC_CFG_KEY);
 }
