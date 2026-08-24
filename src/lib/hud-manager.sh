@@ -41,7 +41,7 @@
 # per-match/per-secret) -- fine for this internal-only relay, but a
 # good candidate to move into a real k8s Secret if this graduates
 # beyond the current single coturn instance.
-: "${TURN_URL:=turn:100.75.253.70:3478}"
+: "${TURN_URL:=turn:152.53.113.41:3478}"
 : "${TURN_USERNAME:=deafcs}"
 : "${TURN_PASSWORD:=30c3d5d8bc60ae56c5971eea}"
 

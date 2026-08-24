@@ -111,6 +111,16 @@
 
     var attempt = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
+      // Root cause found live: this node's route to mediamtx-camera's
+      // tailscale address goes over an interface with MTU 1280, not the
+      // usual 1500 -- small STUN packets fit and made host/srflx pairs
+      // look connected, but the larger DTLS handshake that has to
+      // follow doesn't, and gets silently dropped. "relay" forces every
+      // candidate through TURN_URL (see below, now pointed at the
+      // node's plain public IP so the path there uses a normal
+      // 1500-MTU route instead), skipping host/srflx entirely rather
+      // than hoping ICE falls back off the broken pair on its own.
+      iceTransportPolicy: TURN_URL ? "relay" : "all",
     });
     pc = attempt;
     attempt.addTransceiver("video", { direction: "recvonly" });
@@ -182,12 +192,32 @@
         setTimeout(resolve, ICE_GATHER_TIMEOUT_MS);
       });
     }).then(function () {
-      var candidateLines = (attempt.localDescription.sdp.match(/^a=candidate:.*$/gm) || []);
-      console.log("[camera-overlay] sending offer, " + candidateLines.length + " candidate(s): " + candidateLines.join(" | "));
+      // Root cause found live: this pod's node routes every "host"
+      // candidate (its own tailscale0 IP, and the pod-network cni0 IPs,
+      // which inherit tailscale0's reduced MTU) over an interface with
+      // MTU 1280, not the usual 1500. ICE prefers host candidates over
+      // server-reflexive ones (RFC 8445 priority), so it kept pairing
+      // and nominating those low-MTU host candidates first every time --
+      // small STUN binding packets fit fine and made the exchange look
+      // healthy, but the larger DTLS ClientHello that has to follow
+      // doesn't, and gets silently dropped, hanging until mediamtx's own
+      // ~10s stall timeout. Stripping "typ host" candidates out of our
+      // own offer (keeping only srflx/relay, both of which resolved
+      // through the node's normal 1500-MTU path) forces ICE onto a pair
+      // that's actually proven to work, rather than hoping it falls
+      // back there on its own after the preferred pair fails.
+      var filteredSdp = attempt.localDescription.sdp
+        .split("\r\n")
+        .filter(function (line) {
+          return line.indexOf("a=candidate:") !== 0 || / typ (srflx|relay)( |$)/.test(line);
+        })
+        .join("\r\n");
+      var candidateLines = (filteredSdp.match(/^a=candidate:.*$/gm) || []);
+      console.log("[camera-overlay] sending offer (host candidates stripped), " + candidateLines.length + " candidate(s): " + candidateLines.join(" | "));
       return fetch(SPEC_BASE + "/camera/" + steamId + "/whep", {
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
-        body: attempt.localDescription.sdp,
+        body: filteredSdp,
       });
     }).then(function (res) {
       console.log("[camera-overlay] whep response status=" + res.status);
