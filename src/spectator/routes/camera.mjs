@@ -52,6 +52,17 @@ export async function cameraWhepHandler(req, res, steamId) {
   }
 
   const sdp = await readRawBody(req);
+  // Diagnostic: does the browser's offer actually contain usable ICE
+  // candidates? Logged here (proven to reach kubectl logs, unlike the
+  // renderer's own console.log -- see camera-overlay.js) rather than
+  // relying on Electron's console-message forwarding, which produced
+  // nothing during live debugging despite the script demonstrably
+  // running (this very request proves that).
+  const offerCandidates = sdp.match(/^a=candidate:.*$/gm) || [];
+  process.stderr.write(
+    `[spec-server] camera offer for ${steamId}: ${offerCandidates.length} candidate(s)${offerCandidates.length ? ": " + offerCandidates.join(" | ") : ""}\n`,
+  );
+
   let upstream;
   try {
     upstream = await fetch(
@@ -73,6 +84,10 @@ export async function cameraWhepHandler(req, res, steamId) {
   }
 
   const text = await upstream.text();
+  const answerCandidates = text.match(/^a=candidate:.*$/gm) || [];
+  process.stderr.write(
+    `[spec-server] camera answer for ${steamId}: status=${upstream.status} ${answerCandidates.length} candidate(s)${answerCandidates.length ? ": " + answerCandidates.join(" | ") : ""}\n`,
+  );
   res.writeHead(upstream.status, { "Content-Type": "application/sdp" });
   res.end(text);
 }
