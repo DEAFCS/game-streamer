@@ -113,11 +113,29 @@
     // currentSteamId still set, so poll() kept treating it as "already
     // connecting" and never retried.
     attempt.onconnectionstatechange = function () {
+      // Temporary diagnostic logging (forwarded to the pod's own stdout
+      // via auto-overlay.patch's console-message listener) -- this
+      // whole feature is new and unverified in production, worth
+      // keeping loud until it's proven reliable in the field.
+      console.log("[camera-overlay] connectionState=" + attempt.connectionState + " steamId=" + steamId);
       if (attempt !== pc) return;
       if (attempt.connectionState === "failed" || attempt.connectionState === "closed") {
         failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
         if (attempt === pc) teardown();
       }
+    };
+    attempt.oniceconnectionstatechange = function () {
+      console.log("[camera-overlay] iceConnectionState=" + attempt.iceConnectionState + " steamId=" + steamId);
+    };
+    attempt.onicecandidate = function (e) {
+      if (e.candidate) {
+        console.log("[camera-overlay] local candidate: " + e.candidate.candidate);
+      } else {
+        console.log("[camera-overlay] local candidate gathering complete");
+      }
+    };
+    attempt.onicecandidateerror = function (e) {
+      console.log("[camera-overlay] icecandidateerror: " + e.errorCode + " " + e.errorText + " url=" + e.url);
     };
 
     var connectionTimeoutTimer = setTimeout(function () {
@@ -140,21 +158,24 @@
         setTimeout(resolve, ICE_GATHER_TIMEOUT_MS);
       });
     }).then(function () {
+      var candidateLines = (attempt.localDescription.sdp.match(/^a=candidate:.*$/gm) || []);
+      console.log("[camera-overlay] sending offer, " + candidateLines.length + " candidate(s): " + candidateLines.join(" | "));
       return fetch(SPEC_BASE + "/camera/" + steamId + "/whep", {
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
         body: attempt.localDescription.sdp,
       });
     }).then(function (res) {
+      console.log("[camera-overlay] whep response status=" + res.status);
       if (!res.ok) throw new Error("whep " + res.status);
       return res.text();
     }).then(function (answerSdp) {
       if (attempt !== pc) return; // superseded by a newer attempt/poll
+      var answerCandidateLines = (answerSdp.match(/^a=candidate:.*$/gm) || []);
+      console.log("[camera-overlay] got answer, " + answerCandidateLines.length + " candidate(s): " + answerCandidateLines.join(" | "));
       return attempt.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    }).catch(function () {
-      // Quiet by design -- fires constantly for any spectated player who
-      // simply doesn't have the feature on or hasn't published a camera
-      // yet, the overwhelmingly common case, not an error worth logging.
+    }).catch(function (err) {
+      console.log("[camera-overlay] connect() failed: " + (err && err.message ? err.message : err));
       failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
       if (attempt === pc) teardown();
     });
