@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Build and push ghcr.io/5stackgg/hud-manager from the local hud-manager/
+# Build and push ghcr.io/deafcs/hud-manager from the local hud-manager/
 # context.
 #
 # JTs Hud Manager (upstream JohnTimmermann/JTs-Hud-Manager â€” formerly
 # "OpenHud", renamed in v5.x) is consumed by game-streamer's Dockerfile
-# via `COPY --from=ghcr.io/5stackgg/hud-manager:<tag>`. This script
-# builds the Linux unpacked Electron output and publishes it as :latest
-# plus the pinned HUD_REF (so game-streamer can pin a specific HUD
-# version via --build-arg HUD_IMAGE=ghcr.io/5stackgg/hud-manager:<ref>).
+# via `COPY --from=ghcr.io/deafcs/hud-manager:<tag>`. This script builds
+# the Linux unpacked Electron output (patched by auto-overlay.patch,
+# which now also injects our own camera-overlay.js -- see
+# DEAFCS/deafcs-web#91) and publishes it as :latest plus the pinned
+# HUD_REF (so game-streamer can pin a specific HUD version via
+# --build-arg HUD_IMAGE=ghcr.io/deafcs/hud-manager:<ref>).
+#
+# Deliberately our own registry namespace, not ghcr.io/5stackgg/hud-manager
+# (upstream's public image) -- our auto-overlay.patch has diverged from
+# theirs (camera-overlay.js injection), so we can't just consume their
+# prebuilt image anymore.
 #
 # Usage:
 #   ./push-latest.sh                            # build upstream pin from Dockerfile, push :latest + :<ref>
@@ -15,7 +22,7 @@
 #   HUD_REPO=5stackgg/JTs-Hud-Manager HUD_REF=foo ./push-latest.sh
 set -euo pipefail
 
-IMAGE="ghcr.io/5stackgg/hud-manager"
+IMAGE="ghcr.io/deafcs/hud-manager"
 CACHE_REF="${IMAGE}:buildcache"
 
 HUD_REPO="${HUD_REPO:-JohnTimmermann/JTs-Hud-Manager}"

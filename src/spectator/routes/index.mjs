@@ -10,6 +10,7 @@ import {
   seekStateHandler,
 } from "./capture-fields.mjs";
 import { gsiHandler } from "./gsi.mjs";
+import { cameraStateHandler, cameraWhepHandler } from "./camera.mjs";
 import {
   autodirectorHandler,
   clickHandler,
@@ -49,6 +50,7 @@ const ROUTES = new Map([
   ["GET /demo/pov-state", povStateHandler],
   ["GET /demo/seek-state", seekStateHandler],
   ["POST /gsi", gsiHandler],
+  ["GET /camera/state", cameraStateHandler],
 
   ["POST /spec/click",        clickHandler],
   ["POST /spec/jump",         jumpHandler],
@@ -95,6 +97,21 @@ export async function dispatch(req, res) {
     // Route on the path only — /demo/capture-fields carries a query string.
     const qIdx = url.indexOf("?");
     const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
+
+    // /camera/<steamId>/whep is special-cased ahead of the ROUTES map:
+    // it carries a path param the plain exact-match Map can't express,
+    // and its body is raw SDP (application/sdp), not JSON — the
+    // readJsonBody() call below would reject it as "invalid json"
+    // before ever reaching a handler.
+    if (method === "POST") {
+      const cameraWhepMatch = path.match(/^\/camera\/(\d{17})\/whep$/);
+      if (cameraWhepMatch) {
+        await cameraWhepHandler(req, res, cameraWhepMatch[1]);
+        logResponse(method, "/camera/:steamId/whep", res);
+        return;
+      }
+    }
+
     const handler = ROUTES.get(`${method} ${path}`);
     if (!handler) {
       sendJson(res, 404, { error: "not found" });
@@ -125,7 +142,7 @@ export async function dispatch(req, res) {
 // per-request lines just drown the log.
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
-  "/demo/seek-state",
+  "/demo/seek-state", "/camera/state",
 ]);
 
 function logResponse(method, url, res) {
