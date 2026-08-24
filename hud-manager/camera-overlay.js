@@ -79,6 +79,16 @@
     }
     showLive(false);
     if (videoEl) videoEl.srcObject = null;
+    // Real bug found live: this used to NOT reset currentSteamId, so
+    // poll()'s "steamId === currentSteamId -> already connecting" guard
+    // stayed true forever after any failure -- once a connect() attempt
+    // for a player failed even once, poll() silently gave up on that
+    // player for the rest of the match, no matter how many times they
+    // reconnected their camera or got re-spectated. connect() re-sets
+    // currentSteamId right after calling this, so a fresh attempt is
+    // unaffected; a failure/disconnect path (which doesn't re-set it)
+    // now correctly clears the way for poll()'s next retry.
+    currentSteamId = null;
   }
 
   function connect(steamId) {
