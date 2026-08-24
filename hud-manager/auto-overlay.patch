@@ -42,7 +42,7 @@ index 16f3fad..7ad7455 100644
  import path from 'path'
  import fs from 'fs'
  import net from 'net'
-@@ -52,66 +52,108 @@ const getCfgPath = (steamPath: string) =>
+@@ -52,66 +52,114 @@ const getCfgPath = (steamPath: string) =>
 
  let activeOverlay: BrowserWindow | null = null
 
@@ -176,10 +176,16 @@ index 16f3fad..7ad7455 100644
 +    overlayWindow.webContents.on('did-finish-load', () => {
 +      try {
 +        const specBase = process.env.SPEC_BASE || 'http://127.0.0.1:1350'
++        const turnUrl = process.env.TURN_URL || ''
++        const turnUsername = process.env.TURN_USERNAME || ''
++        const turnPassword = process.env.TURN_PASSWORD || ''
 +        const js = fs.readFileSync(cameraOverlayPath, 'utf-8')
 +        void overlayWindow.webContents
 +          .executeJavaScript(
-+            `window.__DEAFCS_SPEC_BASE__ = ${JSON.stringify(specBase)};\n${js}`
++            `window.__DEAFCS_SPEC_BASE__ = ${JSON.stringify(specBase)};\n` +
++            `window.__DEAFCS_TURN_URL__ = ${JSON.stringify(turnUrl)};\n` +
++            `window.__DEAFCS_TURN_USERNAME__ = ${JSON.stringify(turnUsername)};\n` +
++            `window.__DEAFCS_TURN_PASSWORD__ = ${JSON.stringify(turnPassword)};\n${js}`
 +          )
 +          .catch((e) => console.error('[camera-overlay] inject failed:', e))
 +      } catch (e) {

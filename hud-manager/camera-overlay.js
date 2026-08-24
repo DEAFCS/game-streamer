@@ -17,6 +17,20 @@
   "use strict";
 
   var SPEC_BASE = window.__DEAFCS_SPEC_BASE__ || "http://127.0.0.1:1350";
+  // TURN relay: added after live debugging showed direct ICE
+  // (host + STUN srflx candidates, both otherwise valid and mutually
+  // reachable at the transport level) still consistently failed with
+  // "deadline exceeded while waiting connection" between this
+  // hostNetwork pod and mediamtx-camera across nodes. A relay candidate
+  // sidesteps whatever's blocking the direct path. Falls back to no
+  // TURN entry (STUN-only, the previous behavior) if unset.
+  var TURN_URL = window.__DEAFCS_TURN_URL__ || null;
+  var TURN_USERNAME = window.__DEAFCS_TURN_USERNAME__ || "";
+  var TURN_PASSWORD = window.__DEAFCS_TURN_PASSWORD__ || "";
+  var ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+  if (TURN_URL) {
+    ICE_SERVERS.push({ urls: TURN_URL, username: TURN_USERNAME, credential: TURN_PASSWORD });
+  }
   var POLL_MS = 2000;
   var RETRY_BACKOFF_MS = 15000;
   // Generous on purpose: this client is a hostNetwork pod, not a
@@ -96,7 +110,7 @@
     currentSteamId = steamId;
 
     var attempt = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceServers: ICE_SERVERS,
     });
     pc = attempt;
     attempt.addTransceiver("video", { direction: "recvonly" });
