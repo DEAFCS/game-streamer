@@ -19,7 +19,20 @@
   var SPEC_BASE = window.__DEAFCS_SPEC_BASE__ || "http://127.0.0.1:1350";
   var POLL_MS = 2000;
   var RETRY_BACKOFF_MS = 15000;
-  var ICE_GATHER_TIMEOUT_MS = 1500;
+  // Generous on purpose: this client is a hostNetwork pod, not a
+  // browser on the open internet, so its reflexive candidate can take
+  // longer than a typical 1-1.5s browser default to come back from
+  // mediamtx-camera's STUN server -- matches mediamtx's own configured
+  // webrtcSTUNGatherTimeout (5s) rather than guessing a shorter one.
+  var ICE_GATHER_TIMEOUT_MS = 5000;
+  // How long to wait for the actual media connection (ICE/DTLS) to
+  // establish after a "successful" WHEP signaling exchange, before
+  // giving up and retrying. A 200 from /whep only means the SDP
+  // exchange completed -- it does NOT mean the underlying connection
+  // ever actually came up, and mediamtx itself gives a stalled session
+  // ~10s ("deadline exceeded while waiting connection") before killing
+  // it server-side, so match that.
+  var CONNECTION_TIMEOUT_MS = 12000;
 
   var box = null;
   var videoEl = null;
@@ -83,10 +96,35 @@
       // otherwise a connection that "succeeds" at the SDP level but
       // never receives frames would still paint an empty black box.
       if (attempt !== pc) return;
+      if (connectionTimeoutTimer) {
+        clearTimeout(connectionTimeoutTimer);
+        connectionTimeoutTimer = null;
+      }
       ensureBox();
       videoEl.srcObject = e.streams[0];
       showLive(true);
     };
+
+    // A "successful" WHEP exchange (200 + setRemoteDescription) only
+    // means signaling completed -- it says nothing about whether the
+    // actual ICE/DTLS connection ever comes up. Without this, a stalled
+    // connection (server killed it after ~10s, or it just never
+    // finishes negotiating) left `pc` sitting there forever with
+    // currentSteamId still set, so poll() kept treating it as "already
+    // connecting" and never retried.
+    attempt.onconnectionstatechange = function () {
+      if (attempt !== pc) return;
+      if (attempt.connectionState === "failed" || attempt.connectionState === "closed") {
+        failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
+        if (attempt === pc) teardown();
+      }
+    };
+
+    var connectionTimeoutTimer = setTimeout(function () {
+      if (attempt !== pc) return;
+      failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
+      teardown();
+    }, CONNECTION_TIMEOUT_MS);
 
     attempt.createOffer().then(function (offer) {
       return attempt.setLocalDescription(offer);
