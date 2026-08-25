@@ -7,6 +7,20 @@
 // pre-built binary. window.__DEAFCS_SPEC_BASE__ is set immediately
 // before this script runs (see the patch).
 //
+// Rewritten after extensive live debugging (stale IPs, ICE candidate
+// noise, a real retry-logic bug, a dedicated TURN relay, forcing the
+// relay over a full-MTU public IP -- see git history) never got a
+// direct WebRTC connection working from this pod: this specific
+// deployment's game-streamer runs on a laptop reachable only over a
+// university network's VPN tunnel, and every WebRTC/DTLS handshake
+// attempt from it failed identically regardless of destination, while
+// plain HTTPS (every other spec-server <-> api-deafcs call) works fine
+// on the exact same path. So this no longer does WebRTC at all -- it
+// polls a JPEG snapshot (produced server-side by a headless-browser WHEP
+// consumer, see api-deafcs/snapshotter/) instead of holding its own
+// live video connection. Not real-time video, but simple, reliable,
+// and immune to whatever was blocking raw UDP media on this network.
+//
 // We don't have a verified DOM selector for this HUD's own avatar
 // element (it's not something DEAFCS's fork controls the source of),
 // so this always renders as its own fixed corner box rather than trying
@@ -17,42 +31,18 @@
   "use strict";
 
   var SPEC_BASE = window.__DEAFCS_SPEC_BASE__ || "http://127.0.0.1:1350";
-  // TURN relay: added after live debugging showed direct ICE
-  // (host + STUN srflx candidates, both otherwise valid and mutually
-  // reachable at the transport level) still consistently failed with
-  // "deadline exceeded while waiting connection" between this
-  // hostNetwork pod and mediamtx-camera across nodes. A relay candidate
-  // sidesteps whatever's blocking the direct path. Falls back to no
-  // TURN entry (STUN-only, the previous behavior) if unset.
-  var TURN_URL = window.__DEAFCS_TURN_URL__ || null;
-  var TURN_USERNAME = window.__DEAFCS_TURN_USERNAME__ || "";
-  var TURN_PASSWORD = window.__DEAFCS_TURN_PASSWORD__ || "";
-  var ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
-  if (TURN_URL) {
-    ICE_SERVERS.push({ urls: TURN_URL, username: TURN_USERNAME, credential: TURN_PASSWORD });
-  }
   var POLL_MS = 2000;
-  var RETRY_BACKOFF_MS = 15000;
-  // Generous on purpose: this client is a hostNetwork pod, not a
-  // browser on the open internet, so its reflexive candidate can take
-  // longer than a typical 1-1.5s browser default to come back from
-  // mediamtx-camera's STUN server -- matches mediamtx's own configured
-  // webrtcSTUNGatherTimeout (5s) rather than guessing a shorter one.
-  var ICE_GATHER_TIMEOUT_MS = 5000;
-  // How long to wait for the actual media connection (ICE/DTLS) to
-  // establish after a "successful" WHEP signaling exchange, before
-  // giving up and retrying. A 200 from /whep only means the SDP
-  // exchange completed -- it does NOT mean the underlying connection
-  // ever actually came up, and mediamtx itself gives a stalled session
-  // ~10s ("deadline exceeded while waiting connection") before killing
-  // it server-side, so match that.
-  var CONNECTION_TIMEOUT_MS = 12000;
+  // How long to wait for a snapshot fetch before giving up on this
+  // cycle -- generous, since a slow/first-time snapshot means the
+  // server-side headless page is still negotiating its own (local,
+  // same-cluster) WHEP connection.
+  var FETCH_TIMEOUT_MS = 4000;
 
   var box = null;
-  var videoEl = null;
-  var pc = null;
+  var imgEl = null;
   var currentSteamId = null;
-  var failedUntil = Object.create(null);
+  var currentObjectUrl = null;
+  var fetchInFlight = false;
 
   function ensureBox() {
     if (box) return box;
@@ -71,12 +61,9 @@
       "z-index:2147483647",
       "display:none",
     ].join(";");
-    videoEl = document.createElement("video");
-    videoEl.autoplay = true;
-    videoEl.playsInline = true;
-    videoEl.muted = true;
-    videoEl.style.cssText = "width:100%;height:100%;object-fit:cover;display:block";
-    box.appendChild(videoEl);
+    imgEl = document.createElement("img");
+    imgEl.style.cssText = "width:100%;height:100%;object-fit:cover;display:block";
+    box.appendChild(imgEl);
     document.body.appendChild(box);
     return box;
   }
@@ -87,151 +74,47 @@
   }
 
   function teardown() {
-    if (pc) {
-      try { pc.close(); } catch (e) {}
-      pc = null;
-    }
     showLive(false);
-    if (videoEl) videoEl.srcObject = null;
-    // Real bug found live: this used to NOT reset currentSteamId, so
-    // poll()'s "steamId === currentSteamId -> already connecting" guard
-    // stayed true forever after any failure -- once a connect() attempt
-    // for a player failed even once, poll() silently gave up on that
-    // player for the rest of the match, no matter how many times they
-    // reconnected their camera or got re-spectated. connect() re-sets
-    // currentSteamId right after calling this, so a fresh attempt is
-    // unaffected; a failure/disconnect path (which doesn't re-set it)
-    // now correctly clears the way for poll()'s next retry.
+    if (currentObjectUrl) {
+      URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = null;
+    }
     currentSteamId = null;
   }
 
-  function connect(steamId) {
-    teardown();
-    currentSteamId = steamId;
+  function fetchSnapshot(steamId) {
+    if (fetchInFlight) return;
+    fetchInFlight = true;
 
-    var attempt = new RTCPeerConnection({
-      iceServers: ICE_SERVERS,
-      // Root cause found live: this node's route to mediamtx-camera's
-      // tailscale address goes over an interface with MTU 1280, not the
-      // usual 1500 -- small STUN packets fit and made host/srflx pairs
-      // look connected, but the larger DTLS handshake that has to
-      // follow doesn't, and gets silently dropped. "relay" forces every
-      // candidate through TURN_URL (see below, now pointed at the
-      // node's plain public IP so the path there uses a normal
-      // 1500-MTU route instead), skipping host/srflx entirely rather
-      // than hoping ICE falls back off the broken pair on its own.
-      iceTransportPolicy: TURN_URL ? "relay" : "all",
-    });
-    pc = attempt;
-    attempt.addTransceiver("video", { direction: "recvonly" });
+    var controller = new AbortController();
+    var timeoutTimer = setTimeout(function () {
+      controller.abort();
+    }, FETCH_TIMEOUT_MS);
 
-    attempt.ontrack = function (e) {
-      // Only reveal the box once real track data actually arrives --
-      // otherwise a connection that "succeeds" at the SDP level but
-      // never receives frames would still paint an empty black box.
-      if (attempt !== pc) return;
-      if (connectionTimeoutTimer) {
-        clearTimeout(connectionTimeoutTimer);
-        connectionTimeoutTimer = null;
-      }
-      ensureBox();
-      videoEl.srcObject = e.streams[0];
-      showLive(true);
-    };
-
-    // A "successful" WHEP exchange (200 + setRemoteDescription) only
-    // means signaling completed -- it says nothing about whether the
-    // actual ICE/DTLS connection ever comes up. Without this, a stalled
-    // connection (server killed it after ~10s, or it just never
-    // finishes negotiating) left `pc` sitting there forever with
-    // currentSteamId still set, so poll() kept treating it as "already
-    // connecting" and never retried.
-    attempt.onconnectionstatechange = function () {
-      // Temporary diagnostic logging (forwarded to the pod's own stdout
-      // via auto-overlay.patch's console-message listener) -- this
-      // whole feature is new and unverified in production, worth
-      // keeping loud until it's proven reliable in the field.
-      console.log("[camera-overlay] connectionState=" + attempt.connectionState + " steamId=" + steamId);
-      if (attempt !== pc) return;
-      if (attempt.connectionState === "failed" || attempt.connectionState === "closed") {
-        failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
-        if (attempt === pc) teardown();
-      }
-    };
-    attempt.oniceconnectionstatechange = function () {
-      console.log("[camera-overlay] iceConnectionState=" + attempt.iceConnectionState + " steamId=" + steamId);
-    };
-    attempt.onicecandidate = function (e) {
-      if (e.candidate) {
-        console.log("[camera-overlay] local candidate: " + e.candidate.candidate);
-      } else {
-        console.log("[camera-overlay] local candidate gathering complete");
-      }
-    };
-    attempt.onicecandidateerror = function (e) {
-      console.log("[camera-overlay] icecandidateerror: " + e.errorCode + " " + e.errorText + " url=" + e.url);
-    };
-
-    var connectionTimeoutTimer = setTimeout(function () {
-      if (attempt !== pc) return;
-      failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
-      teardown();
-    }, CONNECTION_TIMEOUT_MS);
-
-    attempt.createOffer().then(function (offer) {
-      return attempt.setLocalDescription(offer);
-    }).then(function () {
-      return new Promise(function (resolve) {
-        if (attempt.iceGatheringState === "complete") return resolve();
-        attempt.addEventListener("icegatheringstatechange", function onChange() {
-          if (attempt.iceGatheringState === "complete") {
-            attempt.removeEventListener("icegatheringstatechange", onChange);
-            resolve();
-          }
-        });
-        setTimeout(resolve, ICE_GATHER_TIMEOUT_MS);
-      });
-    }).then(function () {
-      // Root cause found live: this pod's node routes every "host"
-      // candidate (its own tailscale0 IP, and the pod-network cni0 IPs,
-      // which inherit tailscale0's reduced MTU) over an interface with
-      // MTU 1280, not the usual 1500. ICE prefers host candidates over
-      // server-reflexive ones (RFC 8445 priority), so it kept pairing
-      // and nominating those low-MTU host candidates first every time --
-      // small STUN binding packets fit fine and made the exchange look
-      // healthy, but the larger DTLS ClientHello that has to follow
-      // doesn't, and gets silently dropped, hanging until mediamtx's own
-      // ~10s stall timeout. Stripping "typ host" candidates out of our
-      // own offer (keeping only srflx/relay, both of which resolved
-      // through the node's normal 1500-MTU path) forces ICE onto a pair
-      // that's actually proven to work, rather than hoping it falls
-      // back there on its own after the preferred pair fails.
-      var filteredSdp = attempt.localDescription.sdp
-        .split("\r\n")
-        .filter(function (line) {
-          return line.indexOf("a=candidate:") !== 0 || / typ (srflx|relay)( |$)/.test(line);
-        })
-        .join("\r\n");
-      var candidateLines = (filteredSdp.match(/^a=candidate:.*$/gm) || []);
-      console.log("[camera-overlay] sending offer (host candidates stripped), " + candidateLines.length + " candidate(s): " + candidateLines.join(" | "));
-      return fetch(SPEC_BASE + "/camera/" + steamId + "/whep", {
-        method: "POST",
-        headers: { "Content-Type": "application/sdp" },
-        body: filteredSdp,
-      });
+    fetch(SPEC_BASE + "/camera/" + steamId + "/snapshot", {
+      signal: controller.signal,
     }).then(function (res) {
-      console.log("[camera-overlay] whep response status=" + res.status);
-      if (!res.ok) throw new Error("whep " + res.status);
-      return res.text();
-    }).then(function (answerSdp) {
-      if (attempt !== pc) return; // superseded by a newer attempt/poll
-      var answerCandidateLines = (answerSdp.match(/^a=candidate:.*$/gm) || []);
-      console.log("[camera-overlay] got answer, " + answerCandidateLines.length + " candidate(s): " + answerCandidateLines.join(" | "));
-      return attempt.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    }).catch(function (err) {
-      console.log("[camera-overlay] connect() failed: " + (err && err.message ? err.message : err));
-      failedUntil[steamId] = Date.now() + RETRY_BACKOFF_MS;
-      if (attempt === pc) teardown();
+      clearTimeout(timeoutTimer);
+      if (!res.ok) throw new Error("snapshot " + res.status);
+      return res.blob();
+    }).then(function (blob) {
+      // Player changed (or feature turned off) while this fetch was in
+      // flight -- don't paint a stale frame for the wrong person.
+      if (steamId !== currentSteamId) return;
+      ensureBox();
+      var nextUrl = URL.createObjectURL(blob);
+      var prevUrl = currentObjectUrl;
+      imgEl.src = nextUrl;
+      currentObjectUrl = nextUrl;
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      showLive(true);
+    }).catch(function () {
+      // Quiet by design -- fires constantly for any spectated player who
+      // simply doesn't have the feature on or hasn't published a camera
+      // yet, the overwhelmingly common case, not an error worth logging.
+    }).finally(function () {
+      clearTimeout(timeoutTimer);
+      fetchInFlight = false;
     });
   }
 
@@ -244,19 +127,19 @@
       var steamId = state && state.enabled ? state.steam_id : null;
 
       if (!steamId) {
-        if (currentSteamId !== null) {
-          currentSteamId = null;
-          teardown();
-        }
+        if (currentSteamId !== null) teardown();
         return;
       }
 
-      if (steamId === currentSteamId) return; // already connecting/connected
+      if (steamId !== currentSteamId) {
+        // Switched to a new player -- clear the old frame immediately
+        // (don't show the previous player's face under the new one's
+        // name) rather than waiting for the next fetch to land.
+        currentSteamId = steamId;
+        showLive(false);
+      }
 
-      var until = failedUntil[steamId];
-      if (until && Date.now() < until) return; // still in backoff
-
-      connect(steamId);
+      fetchSnapshot(steamId);
     }).finally(function () {
       setTimeout(poll, POLL_MS);
     });

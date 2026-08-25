@@ -10,7 +10,7 @@ import {
   seekStateHandler,
 } from "./capture-fields.mjs";
 import { gsiHandler } from "./gsi.mjs";
-import { cameraStateHandler, cameraWhepHandler } from "./camera.mjs";
+import { cameraStateHandler, cameraSnapshotHandler } from "./camera.mjs";
 import {
   autodirectorHandler,
   clickHandler,
@@ -98,17 +98,14 @@ export async function dispatch(req, res) {
     const qIdx = url.indexOf("?");
     const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
 
-    // /camera/<steamId>/whep is special-cased ahead of the ROUTES map:
-    // it carries a path param the plain exact-match Map can't express,
-    // and its body is raw SDP (application/sdp), not JSON — the
-    // readJsonBody() call below would reject it as "invalid json"
-    // before ever reaching a handler.
-    if (method === "POST") {
-      const cameraWhepMatch = path.match(/^\/camera\/(\d{17})\/whep$/);
-      if (cameraWhepMatch) {
-        await cameraWhepHandler(req, res, cameraWhepMatch[1]);
-        logResponse(method, "/camera/:steamId/whep", res);
-        return;
+    // /camera/<steamId>/snapshot is special-cased ahead of the ROUTES
+    // map: it carries a path param the plain exact-match Map can't
+    // express.
+    if (method === "GET") {
+      const cameraSnapshotMatch = path.match(/^\/camera\/(\d{17})\/snapshot$/);
+      if (cameraSnapshotMatch) {
+        await cameraSnapshotHandler(req, res, cameraSnapshotMatch[1]);
+        return; // quiet -- polled every ~2s by the overlay, same as /camera/state
       }
     }
 
