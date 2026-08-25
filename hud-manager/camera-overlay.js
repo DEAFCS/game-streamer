@@ -179,6 +179,16 @@
     if (currentSteamId) show(true);
   });
   img.addEventListener("error", function () {
+    // Setting img.src to switch targets aborts whatever request was
+    // previously in flight, which itself fires this same error event a
+    // moment later -- by then currentSteamId already points at the NEW
+    // target, so without this grace window a switch would immediately
+    // (and wrongly) blacklist the player just switched *to*, not the
+    // one switched away from. A genuine failure (camera never
+    // published, spec-server down, etc.) still gets caught -- it just
+    // has to still be failing after the grace window, which any
+    // sustained failure will be.
+    if (Date.now() - connectedAt < 500) return;
     if (currentSteamId) failedUntil.set(currentSteamId, Date.now() + RETRY_BACKOFF_MS);
     show(false);
     img.removeAttribute("src");
