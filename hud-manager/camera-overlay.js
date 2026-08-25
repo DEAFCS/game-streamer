@@ -7,45 +7,47 @@
 // pre-built binary. window.__DEAFCS_SPEC_BASE__ is set immediately
 // before this script runs (see the patch).
 //
-// Rewritten after extensive live debugging (stale IPs, ICE candidate
-// noise, a real retry-logic bug, a dedicated TURN relay, forcing the
-// relay over a full-MTU public IP -- see git history) never got a
-// direct WebRTC connection working from this pod: this specific
-// deployment's game-streamer runs on a laptop reachable only over a
-// university network's VPN tunnel, and every WebRTC/DTLS handshake
-// attempt from it failed identically regardless of destination, while
-// plain HTTPS (every other spec-server <-> api-deafcs call) works fine
-// on the exact same path. So this no longer does WebRTC at all -- it
-// polls a JPEG snapshot (produced server-side by a headless-browser WHEP
-// consumer, see api-deafcs/snapshotter/) instead of holding its own
-// live video connection. That's a deliberate trade-off: a couple of
-// fresh frames a second via polling (POLL_MS below), not real-time
-// video with audio sync -- but reliable, and immune to whatever was
-// blocking raw UDP media on this network.
+// Real WebRTC never worked from this pod (extensive live debugging --
+// stale IPs, ICE noise, a TURN relay, forcing it over a full-MTU public
+// IP -- see git history -- this deployment's game-streamer runs on a
+// laptop reachable only over a university network's VPN tunnel, and
+// every WebRTC/DTLS handshake failed identically regardless of
+// destination, while plain HTTPS always worked fine on the same path).
+// A single-JPEG-every-2s poll sidestepped that but read as a slideshow,
+// not live video -- not good enough for an actual broadcast. This
+// version instead points a plain <img> at a continuous MJPEG stream
+// (GET /camera/:steamId/stream, proxied from api-deafcs's snapshotter --
+// see spec-server's camera.mjs) -- browsers have natively played
+// multipart/x-mixed-replace JPEG streams in <img> forever (it's how
+// most IP/security cameras have always worked), so this gets real,
+// continuously-updating video using only plain HTTP, no WebRTC and no
+// per-frame JS on this end at all.
 //
 // Avatar-mount behavior (selector, hide-the-photo-behind-it, the
 // MutationObserver re-attach loop) mirrors upstream 5stackgg's own
-// camera-overlay.js exactly -- same bundled JTs Hud Manager binary,
-// same markup, verified against their source rather than guessed. Only
-// the actual feed mechanism (poll-a-JPEG vs. hold-a-WebRTC-track)
-// differs, per the above.
+// camera-overlay.js -- same bundled JTs Hud Manager binary, same
+// markup, verified against their source rather than guessed.
 (function () {
   "use strict";
 
   // Injection is wired to did-finish-load, which fires again on any
-  // in-page reload -- without this a second poll loop and observer
-  // stack on top of the first every time.
+  // in-page reload -- without this a second observer and state-poll
+  // loop stack on top of the first every time.
   if (window.__DEAFCS_CAMERA_DISPOSE__) {
     window.__DEAFCS_CAMERA_DISPOSE__();
   }
 
   var SPEC_BASE = window.__DEAFCS_SPEC_BASE__ || "http://127.0.0.1:1350";
-  var POLL_MS = 2000;
-  // How long to wait for a snapshot fetch before giving up on this
-  // cycle -- generous, since a slow/first-time snapshot means the
-  // server-side headless page is still negotiating its own (local,
-  // same-cluster) WHEP connection.
-  var FETCH_TIMEOUT_MS = 4000;
+  var STATE_POLL_MS = 2000;
+  // A player with no camera fails every attempt; back off rather than
+  // re-requesting a doomed stream every couple of seconds.
+  var RETRY_BACKOFF_MS = 15000;
+  // <img> doesn't reliably surface a silently-stalled multipart stream
+  // (server-side hiccup, session reaped, network blip) as an error
+  // event -- it just freezes on the last frame. Force a fresh
+  // connection periodically as a cheap safety net rather than trying to
+  // detect staleness precisely.
+  var RECONNECT_INTERVAL_MS = 60000;
   // The 140x140 box the HUD floats above the spectated player's bar.
   // Present in both hud variants -- `.observed` is not scoped to
   // `.layout-*`.
@@ -102,8 +104,8 @@
   };
 
   var currentSteamId = null;
-  var currentObjectUrl = null;
-  var fetchInFlight = false;
+  var connectedAt = 0;
+  var failedUntil = new Map();
 
   var mode = null;
   var visible = false;
@@ -170,49 +172,29 @@
     attach();
   }
 
-  function teardown() {
+  // Multipart/x-mixed-replace parts each fire their own load event --
+  // the first one landing is exactly "a real frame arrived", the same
+  // signal the old WebRTC client got from ontrack.
+  img.addEventListener("load", function () {
+    if (currentSteamId) show(true);
+  });
+  img.addEventListener("error", function () {
+    if (currentSteamId) failedUntil.set(currentSteamId, Date.now() + RETRY_BACKOFF_MS);
     show(false);
-    if (currentObjectUrl) {
-      URL.revokeObjectURL(currentObjectUrl);
-      currentObjectUrl = null;
-    }
-    currentSteamId = null;
+    img.removeAttribute("src");
+  });
+
+  function connect(steamId) {
+    currentSteamId = steamId;
+    connectedAt = Date.now();
+    show(false);
+    img.src = SPEC_BASE + "/camera/" + steamId + "/stream";
   }
 
-  function fetchSnapshot(steamId) {
-    if (fetchInFlight) return;
-    fetchInFlight = true;
-
-    var controller = new AbortController();
-    var timeoutTimer = setTimeout(function () {
-      controller.abort();
-    }, FETCH_TIMEOUT_MS);
-
-    fetch(SPEC_BASE + "/camera/" + steamId + "/snapshot", {
-      signal: controller.signal,
-    }).then(function (res) {
-      clearTimeout(timeoutTimer);
-      if (!res.ok) throw new Error("snapshot " + res.status);
-      return res.blob();
-    }).then(function (blob) {
-      // Player changed (or feature turned off) while this fetch was in
-      // flight -- don't paint a stale frame for the wrong person.
-      if (steamId !== currentSteamId) return;
-      var nextUrl = URL.createObjectURL(blob);
-      var prevUrl = currentObjectUrl;
-      img.src = nextUrl;
-      currentObjectUrl = nextUrl;
-      if (prevUrl) URL.revokeObjectURL(prevUrl);
-      show(true);
-    }).catch(function () {
-      // Quiet by design -- fires constantly for any spectated player
-      // who simply doesn't have the feature on or hasn't published a
-      // camera yet, the overwhelmingly common case, not an error worth
-      // logging continuously.
-    }).finally(function () {
-      clearTimeout(timeoutTimer);
-      fetchInFlight = false;
-    });
+  function teardown() {
+    show(false);
+    img.removeAttribute("src");
+    currentSteamId = null;
   }
 
   function poll() {
@@ -228,17 +210,19 @@
         return;
       }
 
-      if (steamId !== currentSteamId) {
-        // Switched to a new player -- clear the old frame immediately
-        // (don't show the previous player's face under the new one's
-        // name) rather than waiting for the next fetch to land.
-        currentSteamId = steamId;
-        show(false);
+      if (steamId === currentSteamId) {
+        // Same player still spectated -- periodically force a fresh
+        // connection as a stall safety net (see RECONNECT_INTERVAL_MS).
+        if (Date.now() - connectedAt > RECONNECT_INTERVAL_MS) connect(steamId);
+        return;
       }
 
-      fetchSnapshot(steamId);
+      var backoff = failedUntil.get(steamId) || 0;
+      if (Date.now() < backoff) return;
+
+      connect(steamId);
     }).finally(function () {
-      setTimeout(poll, POLL_MS);
+      setTimeout(poll, STATE_POLL_MS);
     });
   }
 
