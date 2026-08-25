@@ -1,6 +1,6 @@
 import process from "node:process";
 import { Readable } from "node:stream";
-import { finished } from "node:stream/promises";
+import { pipeline } from "node:stream/promises";
 
 import { gsiState } from "../state/gsi.mjs";
 import { sendJson, CORS_HEADERS } from "../util/http.mjs";
@@ -94,7 +94,16 @@ export async function cameraStreamHandler(req, res, steamId) {
   });
 
   try {
-    await finished(Readable.fromWeb(upstream.body).pipe(res));
+    // stream.pipeline(), not a manual .pipe() -- .pipe() returns the
+    // *destination* stream, so awaiting finished() on its return value
+    // (an earlier version of this code) was watching the wrong object:
+    // the source (Readable.fromWeb(upstream.body)) had no error
+    // listener of its own, so an abort (a viewer disconnecting, or the
+    // overlay switching targets) crashed the entire spec-server process
+    // with an unhandled 'error' event instead of landing here. pipeline()
+    // correctly wires up and aggregates errors from every stream in the
+    // chain.
+    await pipeline(Readable.fromWeb(upstream.body), res);
   } catch {
     // Viewer disconnected mid-stream, or the upstream session got torn
     // down -- both routine, nothing to log every time.
