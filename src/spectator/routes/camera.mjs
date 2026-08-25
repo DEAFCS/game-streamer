@@ -1,7 +1,7 @@
 import process from "node:process";
 
 import { gsiState } from "../state/gsi.mjs";
-import { sendJson } from "../util/http.mjs";
+import { sendJson, CORS_HEADERS } from "../util/http.mjs";
 
 // Streamer-facing camera overlay: hud-manager/camera-overlay.js (running
 // inside the HUD's Electron overlay window) polls GET /camera/state to
@@ -42,12 +42,12 @@ export async function cameraStateHandler(_req, res) {
 export async function cameraSnapshotHandler(_req, res, steamId) {
   const matchId = process.env.MATCH_ID;
   if (!matchId) {
-    res.writeHead(503, { "Content-Type": "text/plain" });
+    res.writeHead(503, { "Content-Type": "text/plain", ...CORS_HEADERS });
     res.end("camera snapshot not configured");
     return;
   }
   if (!/^\d{17}$/.test(steamId)) {
-    res.writeHead(400, { "Content-Type": "text/plain" });
+    res.writeHead(400, { "Content-Type": "text/plain", ...CORS_HEADERS });
     res.end("invalid steamId");
     return;
   }
@@ -59,13 +59,13 @@ export async function cameraSnapshotHandler(_req, res, steamId) {
       { signal: AbortSignal.timeout(5_000) },
     );
   } catch (err) {
-    res.writeHead(502, { "Content-Type": "text/plain" });
+    res.writeHead(502, { "Content-Type": "text/plain", ...CORS_HEADERS });
     res.end(`snapshotter unreachable: ${err?.message ?? err}`);
     return;
   }
 
   if (!upstream.ok) {
-    res.writeHead(upstream.status).end();
+    res.writeHead(upstream.status, CORS_HEADERS).end();
     return;
   }
 
@@ -74,6 +74,7 @@ export async function cameraSnapshotHandler(_req, res, steamId) {
     "Content-Type": "image/jpeg",
     "Cache-Control": "no-store",
     "Content-Length": String(buf.length),
+    ...CORS_HEADERS,
   });
   res.end(buf);
 }
