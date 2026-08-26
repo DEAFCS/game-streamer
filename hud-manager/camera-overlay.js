@@ -38,7 +38,12 @@
   }
 
   var SPEC_BASE = window.__DEAFCS_SPEC_BASE__ || "http://127.0.0.1:1350";
-  var STATE_POLL_MS = 2000;
+  // Kept tight: this is the main source of "camera lags behind the
+  // switch" delay (auto-director and manual switches both change what
+  // CS2 itself is observing, which GSI already reports at ~10Hz -- the
+  // camera shouldn't be slower to notice than that). A plain JSON
+  // fetch this small and this local is cheap enough to poll fast.
+  var STATE_POLL_MS = 300;
   // A player with no camera fails every attempt; back off rather than
   // re-requesting a doomed stream every couple of seconds.
   var RETRY_BACKOFF_MS = 15000;
