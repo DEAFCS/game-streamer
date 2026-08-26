@@ -1,13 +1,9 @@
 # JTs Hud Manager (CS2 spectator HUD; upstream JohnTimmermann/JTs-Hud-Manager,
 # renamed from OpenHud in v5.x) is built + published as its own image (see
 # hud-manager/Dockerfile). Pin the tag with --build-arg HUD_IMAGE=...,
-# defaulting to :latest off our own package registry -- deafcs, NOT
-# upstream's ghcr.io/5stackgg/hud-manager, since our auto-overlay.patch
-# has diverged from theirs (adds camera-overlay.js injection for
-# match_options.streamer_camera_enabled, see DEAFCS/deafcs-web#91).
-# Declared before the first FROM so it can substitute into the stage ref
-# below.
-ARG HUD_IMAGE=ghcr.io/deafcs/hud-manager:latest
+# defaulting to :latest off our package registry. Declared before the
+# first FROM so it can substitute into the stage ref below.
+ARG HUD_IMAGE=ghcr.io/5stackgg/hud-manager:latest
 FROM ${HUD_IMAGE} AS hud
 
 FROM nvidia/cuda:12.6.3-base-ubuntu24.04

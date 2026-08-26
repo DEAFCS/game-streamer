@@ -10,7 +10,6 @@ import {
   seekStateHandler,
 } from "./capture-fields.mjs";
 import { gsiHandler } from "./gsi.mjs";
-import { cameraStateHandler, cameraSnapshotHandler, cameraStreamHandler } from "./camera.mjs";
 import {
   autodirectorHandler,
   clickHandler,
@@ -50,7 +49,6 @@ const ROUTES = new Map([
   ["GET /demo/pov-state", povStateHandler],
   ["GET /demo/seek-state", seekStateHandler],
   ["POST /gsi", gsiHandler],
-  ["GET /camera/state", cameraStateHandler],
 
   ["POST /spec/click",        clickHandler],
   ["POST /spec/jump",         jumpHandler],
@@ -97,23 +95,6 @@ export async function dispatch(req, res) {
     // Route on the path only — /demo/capture-fields carries a query string.
     const qIdx = url.indexOf("?");
     const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
-
-    // /camera/<steamId>/snapshot and /camera/<steamId>/stream are
-    // special-cased ahead of the ROUTES map: they carry a path param
-    // the plain exact-match Map can't express.
-    if (method === "GET") {
-      const cameraStreamMatch = path.match(/^\/camera\/(\d{17})\/stream$/);
-      if (cameraStreamMatch) {
-        await cameraStreamHandler(req, res, cameraStreamMatch[1]);
-        return; // quiet -- long-lived per connected viewer, not a per-request thing
-      }
-      const cameraSnapshotMatch = path.match(/^\/camera\/(\d{17})\/snapshot$/);
-      if (cameraSnapshotMatch) {
-        await cameraSnapshotHandler(req, res, cameraSnapshotMatch[1]);
-        return; // quiet -- unused by the live overlay now (see camera.mjs), kept for reuse
-      }
-    }
-
     const handler = ROUTES.get(`${method} ${path}`);
     if (!handler) {
       sendJson(res, 404, { error: "not found" });
@@ -144,7 +125,7 @@ export async function dispatch(req, res) {
 // per-request lines just drown the log.
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
-  "/demo/seek-state", "/camera/state",
+  "/demo/seek-state",
 ]);
 
 function logResponse(method, url, res) {

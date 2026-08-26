@@ -42,7 +42,7 @@ index 16f3fad..7ad7455 100644
  import path from 'path'
  import fs from 'fs'
  import net from 'net'
-@@ -52,66 +52,114 @@ const getCfgPath = (steamPath: string) =>
+@@ -52,66 +52,78 @@ const getCfgPath = (steamPath: string) =>
 
  let activeOverlay: BrowserWindow | null = null
 
@@ -157,42 +157,6 @@ index 16f3fad..7ad7455 100644
 +  activeOverlay = overlayWindow
 +  overlayWindow.setIgnoreMouseEvents(true, { forward: true })
 +  overlayWindow.loadURL(hudUrl)
-+
-+  // deafcs: the overlay renderer is otherwise a black box -- surface its
-+  // console in the pod log so injected scripts can be diagnosed without a rebuild.
-+  overlayWindow.webContents.on('console-message', (_e, _level, message, line, sourceId) => {
-+    console.log(`[overlay-console] ${message} (${sourceId}:${line})`)
-+  })
-+
-+  // deafcs: live camera overlay on the spectated player's avatar
-+  // (match_options.streamer_camera_enabled, see DEAFCS/deafcs-web#91).
-+  // Loaded from disk and injected rather than embedded here so the
-+  // overlay stays a normal reviewable file, and appended to the page
-+  // rather than woven into the HUD's own DOM -- this has to survive
-+  // JTs Hud Manager updating its bundled HUD without us maintaining a
-+  // fork of that HUD's markup.
-+  const cameraOverlayPath = process.env.HUD_CAMERA_OVERLAY_JS
-+  if (cameraOverlayPath) {
-+    overlayWindow.webContents.on('did-finish-load', () => {
-+      try {
-+        const specBase = process.env.SPEC_BASE || 'http://127.0.0.1:1350'
-+        const turnUrl = process.env.TURN_URL || ''
-+        const turnUsername = process.env.TURN_USERNAME || ''
-+        const turnPassword = process.env.TURN_PASSWORD || ''
-+        const js = fs.readFileSync(cameraOverlayPath, 'utf-8')
-+        void overlayWindow.webContents
-+          .executeJavaScript(
-+            `window.__DEAFCS_SPEC_BASE__ = ${JSON.stringify(specBase)};\n` +
-+            `window.__DEAFCS_TURN_URL__ = ${JSON.stringify(turnUrl)};\n` +
-+            `window.__DEAFCS_TURN_USERNAME__ = ${JSON.stringify(turnUsername)};\n` +
-+            `window.__DEAFCS_TURN_PASSWORD__ = ${JSON.stringify(turnPassword)};\n${js}`
-+          )
-+          .catch((e) => console.error('[camera-overlay] inject failed:', e))
-+      } catch (e) {
-+        console.error('[camera-overlay] could not read overlay script:', e)
-+      }
-+    })
-+  }
 +  enforceOverlayOnTop(overlayWindow)
 +
 +  overlayWindow.on('closed', () => {

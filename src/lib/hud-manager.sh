@@ -26,29 +26,9 @@
 : "${HUD_MODE:=horizontal}"
 : "${API_BASE:=}"
 : "${API_TOKEN:=}"
-# deafcs: live camera overlay on the spectated player (see
-# DEAFCS/deafcs-web#91). Read by auto-overlay.patch inside the HUD
-# process itself, not by anything in this script -- HUD_CAMERA_OVERLAY_JS
-# is the script auto-overlay.patch injects into the overlay window on
-# load; SPEC_BASE is where that injected script polls/posts to (this
-# same pod's own spec-server, see src/spectator/routes/camera.mjs).
-: "${HUD_CAMERA_OVERLAY_JS:=/opt/hud-manager/camera-overlay.js}"
-: "${SPEC_BASE:=http://127.0.0.1:${SPEC_SERVER_PORT:-1350}}"
-# TURN relay for the camera overlay's WHEP pull -- added after live
-# debugging found direct ICE (host + STUN srflx candidates, otherwise
-# valid) consistently failing cross-node between this hostNetwork pod
-# and mediamtx-camera. Shared static credential for now (not
-# per-match/per-secret) -- fine for this internal-only relay, but a
-# good candidate to move into a real k8s Secret if this graduates
-# beyond the current single coturn instance.
-: "${TURN_URL:=turn:152.53.113.41:3478}"
-: "${TURN_USERNAME:=deafcs}"
-: "${TURN_PASSWORD:=30c3d5d8bc60ae56c5971eea}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
-       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE \
-       HUD_CAMERA_OVERLAY_JS SPEC_BASE \
-       TURN_URL TURN_USERNAME TURN_PASSWORD
+       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 

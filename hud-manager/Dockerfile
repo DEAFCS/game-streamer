@@ -86,11 +86,6 @@ RUN npm run build && npx electron-builder --linux --dir \
 RUN mkdir -p /out/hud-manager \
  && cp -a dist/linux-unpacked/. /out/hud-manager/
 
-# deafcs: camera-overlay.js (injected into the overlay window by
-# auto-overlay.patch above via HUD_CAMERA_OVERLAY_JS) needs to actually
-# be present in the image at a stable path for fs.readFileSync to find.
-COPY camera-overlay.js /out/hud-manager/camera-overlay.js
-
 # ---- Stage 2: publishable image ---------------------------------------------
 # `scratch` would be ideal for a pure-payload image, but BuildKit's
 # remote `COPY --from=<image>` against a scratch image can be flaky on
