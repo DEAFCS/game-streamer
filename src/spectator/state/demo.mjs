@@ -130,7 +130,7 @@ export function reconcileTickFromGsi(prev) {
 
   // cs2 can lose a demo_pause (exec-cfg keypress on a not-yet-
   // interactable cs2); if demo time advances while we believe paused,
-  // adopt reality.
+  // re-send it rather than giving up on the pause.
   const timeAdvanced =
     prev.prevPhaseEndsIn !== null &&
     gsiState.phaseEndsIn !== null &&
