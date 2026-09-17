@@ -33,6 +33,9 @@ SCRIPT_TAG=run-live
 load_env
 require_env MATCH_ID
 
+# Graceful pod delete: release the GPU display before the container's SIGKILL.
+trap 'shutdown_display; exit 143' TERM
+
 start_status_reporter
 
 # Three connect modes mirror api/GameStreamerService:buildConnectEnv.

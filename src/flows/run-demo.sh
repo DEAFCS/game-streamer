@@ -33,6 +33,9 @@ SCRIPT_TAG=run-demo
 load_env
 require_env MATCH_ID DEMO_URL
 
+# Graceful pod delete: release the GPU display before the container's SIGKILL.
+trap 'shutdown_display; exit 143' TERM
+
 start_status_reporter
 
 : "${FPS:=60}"
@@ -386,6 +389,7 @@ if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   # shellcheck disable=SC1091
   . "$LIB_DIR/batch-highlights.sh"
   process_batch_jobs
+  shutdown_display
   exit 0
 fi
 

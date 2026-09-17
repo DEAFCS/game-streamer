@@ -64,7 +64,59 @@ _try_start_xorg_on() {
   done
   log "xorg: $disp never accepted clients within 10s â€” killing"
   kill "$xpid" 2>/dev/null || true
+  for i in $(seq 1 10); do
+    kill -0 "$xpid" 2>/dev/null || return 1
+    sleep 0.5
+  done
+  kill -9 "$xpid" 2>/dev/null || true
+  sleep 2
+  # An Xorg that survives SIGKILL is stuck in the kernel (nvidia-modeset waiting
+  # on the GPU). Every further Xorg blocks behind it, so walking on just stacks
+  # more stuck servers onto the same GPU.
+  if kill -0 "$xpid" 2>/dev/null; then
+    die "Xorg on $disp hung during startup and survived SIGKILL — GPU display engine is wedged (check the node's dmesg for 'nvidia-modeset ... waiting for GPU progress'); the node likely needs a reboot."
+  fi
   return 1
+}
+
+# Is some X server bound to :$1's abstract socket in our network namespace?
+# Pods are hostNetwork, so this sees the host's and other pods' X servers even
+# though their /tmp lock files and PIDs are invisible from here.
+_x_socket_bound() {
+  grep -qs "@/tmp/.X11-unix/X${1}\$" /proc/net/unix
+}
+
+# Never start a GPU Xorg while another streamer's Xorg still owns the display: a
+# second nvidia modeset against a GPU whose display is held (previous pod still
+# tearing down, or its Xorg wedged in nvidia-modeset) hangs silently and can
+# wedge the display engine for the whole node. Our own servers are tagged with
+# _GS_STREAMER on the root window; an untagged live X is a host desktop, which
+# the walk + dummy fallback in start_xorg handles.
+_wait_for_foreign_streamer_x() {
+  local start_n="${DISPLAY#:}" n held how announced=0
+  local max="${GS_FOREIGN_X_WAIT:-60}"
+  local deadline=$((SECONDS + max))
+  while :; do
+    held=""
+    for n in $(seq "$start_n" $((start_n + 9))); do
+      _x_socket_bound "$n" || continue
+      if ! timeout 5 xdpyinfo -display ":$n" >/dev/null 2>&1; then
+        held=":$n"; how="bound but not answering"; break
+      fi
+      if timeout 5 xprop -display ":$n" -root _GS_STREAMER 2>/dev/null | grep -q '='; then
+        held=":$n"; how="owned by another streamer pod"; break
+      fi
+    done
+    [ -z "$held" ] && return 0
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      die "X server on $held is $how after ${max}s — a previous streamer pod on this node never released the GPU display (still running, or its Xorg is wedged in nvidia-modeset). Not starting a second GPU Xorg against it. If no other streamer pod is running on the node, it needs a reboot."
+    fi
+    if [ "$announced" -eq 0 ]; then
+      log "xorg: $held is $how — waiting up to ${max}s for it to go away"
+      announced=1
+    fi
+    sleep 3
+  done
 }
 
 # Enable NVIDIA persistence mode before the first Xorg modeset. With it off the
@@ -152,7 +204,8 @@ start_xorg() {
     # on xdpyinfo right after the status-reporter line, no further logs).
     die "Xorg on $DISPLAY is present but unresponsive (>5s) â€” GPU/DRM modeset wedge; the node is likely poisoned until reboot. Failing so the pod reschedules."
   else
-    # Resident-driver state before the first modeset â€” see enable_gpu_persistence.
+    _wait_for_foreign_streamer_x
+    # Resident-driver state before the first modeset — see enable_gpu_persistence.
     enable_gpu_persistence
     # Host may already be running a desktop on :0 (gnome-shell etc.) and
     # bind-mount /tmp/.X11-unix into the pod â€” that collides with our
@@ -210,11 +263,30 @@ start_xorg() {
   # Open X access so processes spawned outside our pgid can connect.
   xhost +local:           >/dev/null 2>&1 || true
   xhost +SI:localuser:root >/dev/null 2>&1 || true
+
+  # Mark this X as a streamer's — see _wait_for_foreign_streamer_x.
+  xprop -root -f _GS_STREAMER 8s -set _GS_STREAMER "${HOSTNAME:-game-streamer}" >/dev/null 2>&1 || true
 }
 
+# SIGTERM and wait, so the nvidia driver releases the display in order. Leaving
+# Xorg for the container teardown means SIGKILL while it still owns the display.
 stop_xorg() {
   pkill -x openbox 2>/dev/null || true
   pkill -x Xorg    2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    pgrep -x Xorg >/dev/null 2>&1 || return 0
+    sleep 0.5
+  done
+  warn "Xorg still alive 10s after SIGTERM"
+  return 1
+}
+
+# Orderly end-of-pod teardown: GPU clients first, then the X server.
+shutdown_display() {
+  declare -F kill_steam >/dev/null 2>&1 && kill_steam
+  sleep 1
+  stop_xorg || true
 }
 
 list_x_windows() {
