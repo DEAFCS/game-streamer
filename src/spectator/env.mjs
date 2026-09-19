@@ -20,6 +20,10 @@ export const EXEC_CFG_PATH = CS2_CFG_DIR ? `${CS2_CFG_DIR}/5stack_exec.cfg` : nu
 
 export const DEMO_FILE = process.env.DEMO_FILE ?? "/tmp/game-streamer/demo.dem";
 
+// Last status body the api accepted, written by status-reporter.sh's daemon.
+export const STATUS_ACK_FILE =
+  process.env.STATUS_ACK_FILE ?? path.join(LOG_DIR, "status.ack");
+
 export const DEMO_SESSION_ID    = process.env.DEMO_SESSION_ID    ?? null;
 export const STATUS_API_BASE    = process.env.STATUS_API_BASE ?? process.env.API_BASE ?? null;
 

@@ -283,6 +283,9 @@ _status_daemon_loop() {
         case "$http_code" in
           2*)
             last_hash="$current_hash"
+            # The spec-server holds its `playing` beacon until this shows `live`.
+            printf '%s' "$body" >"$STATUS_ACK_FILE.tmp" \
+              && mv -f "$STATUS_ACK_FILE.tmp" "$STATUS_ACK_FILE"
             printf '[status-reporter] %s -> %s\n' "$body" "$http_code" >&2
             ;;
           *)

@@ -1,7 +1,8 @@
 import process from "node:process";
+import { readFileSync } from "node:fs";
 
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
-import { DEMO_SESSION_ID, STATUS_API_BASE } from "../env.mjs";
+import { DEMO_SESSION_ID, STATUS_ACK_FILE, STATUS_API_BASE } from "../env.mjs";
 import { demoState } from "../state/demo.mjs";
 
 export const playingState = {
@@ -11,7 +12,16 @@ export const playingState = {
   demouiHidden: false,
 };
 
+// Bumped on every reset so a beacon still waiting/retrying for the previous
+// playback stops instead of double-posting alongside the new one.
+let generation = 0;
+
+const LIVE_ACK_POLL_MS    = 500;
+const LIVE_ACK_TIMEOUT_MS = 60_000;
+const POST_RETRY_MS       = 2_000;
+
 export function resetPlayingState() {
+  generation += 1;
   playingState.reported = false;
   playingState.demouiHidden = false;
 }
@@ -52,20 +62,54 @@ export async function reportDemoPlayingOnce() {
   demoState.lastSeekRealMs = Date.now();
 
   if (!DEMO_SESSION_ID || !STATUS_API_BASE) return;
-  const url = `${STATUS_API_BASE}/demo-sessions/${DEMO_SESSION_ID}/status`;
+  await postPlaying(generation);
+}
+
+function liveAcked() {
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "playing" }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) {
-      process.stderr.write(`[spec-server] status=playing POST ${res.status}\n`);
-    }
-  } catch (err) {
+    return JSON.parse(readFileSync(STATUS_ACK_FILE, "utf8")).status === "live";
+  } catch {
+    return false;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// GSI flows as soon as cs2 has the demo loaded, which is routinely BEFORE
+// run-demo.sh finishes start_capture and its `live` reaches the api through
+// the 2s status daemon. `playing` sent that early either gets overwritten by
+// the late `live` (viewer stuck on "Demo Loading") or mounts the WHEP player
+// against a path with no publisher (3 failures → permanent HLS fallback). So
+// hold it until `live` is acked, and keep retrying: nothing re-sends it.
+async function postPlaying(mine) {
+  const deadline = Date.now() + LIVE_ACK_TIMEOUT_MS;
+  while (mine === generation && !liveAcked() && Date.now() < deadline) {
+    await sleep(LIVE_ACK_POLL_MS);
+  }
+  if (mine === generation && !liveAcked()) {
     process.stderr.write(
-      `[spec-server] status=playing POST failed: ${(err && err.message) || err}\n`,
+      `[spec-server] status=live never acked after ${LIVE_ACK_TIMEOUT_MS}ms — sending playing anyway\n`,
     );
+  }
+
+  const url = `${STATUS_API_BASE}/demo-sessions/${DEMO_SESSION_ID}/status`;
+  while (mine === generation) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "playing" }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) return;
+      process.stderr.write(`[spec-server] status=playing POST ${res.status}\n`);
+      // 4xx won't get better by asking again (bad body / session gone).
+      if (res.status >= 400 && res.status < 500) return;
+    } catch (err) {
+      process.stderr.write(
+        `[spec-server] status=playing POST failed: ${(err && err.message) || err}\n`,
+      );
+    }
+    await sleep(POST_RETRY_MS);
   }
 }
