@@ -533,6 +533,11 @@ if len(team_ids) >= 2 and all(team_ids[:2]):
     if lineup_2_id:
         lineup_to_team[str(lineup_2_id)] = team_ids[1]
 
+    # The api sends the raw e_match_map_status value. WaitingForTV is left out
+    # on purpose: the winner is known in real time, but a TV feed is still
+    # tv_delay behind and would show the result before it happens.
+    ended_statuses = {'UploadingDemo', 'Finished', 'Surrendered'}
+
     left_wins = 0
     right_wins = 0
     vetos = []
@@ -540,9 +545,9 @@ if len(team_ids) >= 2 and all(team_ids[:2]):
         map_name = (mm.get('map_name') or '').strip()
         if not map_name:
             continue
-        status = mm.get('status') or 'pending'
         winning_lineup_id = mm.get('winning_lineup_id')
-        winner_team = lineup_to_team.get(str(winning_lineup_id)) if winning_lineup_id else None
+        map_ended = mm.get('status') in ended_statuses
+        winner_team = lineup_to_team.get(str(winning_lineup_id)) if map_ended and winning_lineup_id else None
         if winner_team == team_ids[0]:
             left_wins += 1
         elif winner_team == team_ids[1]:
@@ -557,9 +562,9 @@ if len(team_ids) >= 2 and all(team_ids[:2]):
             'side': 'NO',
             'type': veto_type,
             'reverseSide': False,
-            'mapEnd': status == 'finished',
+            'mapEnd': map_ended,
         }
-        if status == 'finished':
+        if map_ended:
             veto['score'] = {
                 team_ids[0]: int(mm.get('lineup_1_score') or 0),
                 team_ids[1]: int(mm.get('lineup_2_score') or 0),
