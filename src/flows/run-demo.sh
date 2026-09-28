@@ -45,15 +45,14 @@ start_status_reporter
 # (drops, no dups) â€” headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 : "${CS2_FPS_MAX:=120}"
-# TrueView prediction for the spectated player's view: reconstructs the observed
-# player's real camera/aim by re-running client-side prediction instead of showing
-# tick-sampled server angles. 2 = always predict (smoothest aim; overrides the
-# demo-build-version check so older 5stack demos still get the predicted POV),
-# 1 = predict only on build match, 0 = off. Applied in the demo autoexec.
-: "${CS2_DEMO_PREDICT:=2}"
-# Debug overlay: bake cl_showfps + net_graph into the captured clip (cs2's real
-# render fps + frametime, readable straight off the mp4). 0 = off (production,
-# clean clips); 1 = on to diagnose a capture/perf issue.
+# TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
+# Off by default: it made playback jitter, showed predicted shots early and dropped
+# the POV player's own gunshots. Smooth beats pixel-perfect.
+: "${CS2_DEMO_PREDICT:=0}"
+log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT}"
+# Debug overlay: bake cl_showfps + the TrueView status line into the captured clip
+# (cs2's real render fps, and whether TrueView is active, readable straight off
+# the mp4). 0 = off (production, clean clips); 1 = on to diagnose a capture/perf issue.
 : "${CS2_DEBUG_OVERLAY:=0}"
 # Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
 # the detected GPU class (explicit env still wins; cs2 threads left to the engine).
@@ -157,9 +156,6 @@ volume 1.0
 cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
-// demo_interpolateview defaults to 1 (smooth camera between ticks); pinned
-// here so a config/build change can't silently reintroduce tick-stepping.
-demo_interpolateview 1
 // cl_demo_predict is env-tunable via CS2_DEMO_PREDICT (injected into
 // live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.
@@ -200,9 +196,9 @@ cl_demo_predict ${CS2_DEMO_PREDICT}
 spec_show_xray $([ "${CLIP_BATCH_MODE:-0}" = "1" ] && echo 0 || echo 1)
 // Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
 r_fullscreen_gamma 2
-// Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + net_graph into the
-// clip so cs2's real render fps/frametime is visible. Emits nothing when off.
-$([ "${CS2_DEBUG_OVERLAY:-0}" = "1" ] && printf 'cl_showfps 1\nnet_graph 1')
+// Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + TrueView status into
+// the clip. Emits nothing when off.
+$([ "${CS2_DEBUG_OVERLAY:-0}" = "1" ] && printf 'cl_showfps 1\ncl_trueview_show_status 2')
 EOF
 
 # Pre-create empty so cs2's `exec 5stack_exec` doesn't error before
@@ -319,6 +315,9 @@ do_applaunch() {
   local cmd=("${cs2_pin[@]}" "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }
+CS2_CONSOLE_LOG="$CS2_DIR/game/csgo/console.log"
+CS2_CONSOLE_OFFSET=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
+CS2_CONSOLE_OFFSET="${CS2_CONSOLE_OFFSET//[!0-9]/}"
 do_applaunch
 wait_for_cs2_process do_applaunch
 
@@ -365,6 +364,23 @@ fi
 if hud_running; then
   ( position_hud_overlay || true ) &
 fi
+
+# Log cs2's TrueView verdict for this demo (demo vs client build, cl_demo_predict).
+(
+  offset="${CS2_CONSOLE_OFFSET:-0}"
+  for _ in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
+    size=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
+    [ "${size//[!0-9]/}" -lt "$offset" ] 2>/dev/null && offset=0  # cs2 truncated it
+    hit=$(tail -c "+$((offset + 1))" "$CS2_CONSOLE_LOG" 2>/dev/null \
+      | grep -aiE 'demo is version|trueview is' | head -3)
+    if [ -n "$hit" ]; then
+      log "TrueView (cl_demo_predict=${CS2_DEMO_PREDICT}): ${hit//$'\n'/ | }"
+      exit 0
+    fi
+    sleep 1
+  done
+  log "TrueView: no demo-version line in console.log (cl_demo_predict=${CS2_DEMO_PREDICT})"
+) &
 
 # Surface a silent cs2 crash so the pod doesn't sit in "status=live but
 # no frames".

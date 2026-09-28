@@ -231,6 +231,8 @@ write_gsi_cfg() {
   rm -f "$cfg_dir/gamestate_integration_jts_hud_manager.cfg"
   local dst="$cfg_dir/gamestate_integration_5stack.cfg"
   local port="${SPEC_SERVER_PORT:-1350}"
+  # heartbeat 1s: cs2 sends nothing else while a demo is paused, and the clip
+  # renderer's seek-settle check needs a post-landing GSI frame (10s outlived its 8s wait).
   cat >"$dst" <<EOF
 "5Stack GSI"
 {
@@ -238,7 +240,7 @@ write_gsi_cfg() {
   "timeout" "5.0"
   "buffer" "0.0"
   "throttle" "0.1"
-  "heartbeat" "10.0"
+  "heartbeat" "1.0"
   "auth" { "token" "5stack-spec" }
   "data"
   {

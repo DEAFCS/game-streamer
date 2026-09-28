@@ -21,6 +21,9 @@ CLIP_SEGMENT_TIMEOUT_FACTOR="${CLIP_SEGMENT_TIMEOUT_FACTOR:-2}"
 # (the documented ~2s post-seek stall). Bounds tail over-record to ~this if the
 # freeze signal ever misfires.
 CLIP_UNBILLED_CAP_MS="${CLIP_UNBILLED_CAP_MS:-2200}"
+# Demo time played unrecorded before each segment, so the seek's aftermath (held
+# frames, smokes re-blooming, sound restarting) never reaches the clip. 0 disables.
+CLIP_PREROLL_MS="${CLIP_PREROLL_MS:-2000}"
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 : "${ROUND_TICKS_PATH:=${LOG_DIR:-/tmp/game-streamer}/demo-round-ticks.json}"
 
@@ -337,19 +340,26 @@ wait_seek_settled() {
   return 1
 }
 
+# "phase|phase_ends|motion|gsi_age|map_phase|round|pov_kills"; empty on failure.
+capture_fields_line() {
+  if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
+    curl --fail --silent --max-time 5 \
+      "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true
+  else
+    spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true
+  fi
+}
+
 # "phase_ends|world_motion" — the GSI fields that advance only while the demo is
 # actually rolling. Returns 1 (empty) when GSI is stale, so callers can tell
-# "no signal" apart from "not moving yet".
+# "no signal" apart from "not moving yet"; pass "any" as $2 to skip that check.
 playback_sig() {
   local line _p _pe _mo _age _mp _rn _pk
-  if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-    line=$(curl --fail --silent --max-time 5 \
-      "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true)
-  else
-    line=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true)
-  fi
+  line=$(capture_fields_line "${1:-}")
   IFS='|' read -r _p _pe _mo _age _mp _rn _pk <<<"$line"
-  { [ -n "$_age" ] && [ "$_age" -le 750 ]; } 2>/dev/null || return 1
+  if [ "${2:-}" != "any" ]; then
+    { [ -n "$_age" ] && [ "$_age" -le 750 ]; } 2>/dev/null || return 1
+  fi
   printf '%s|%s' "$_pe" "$_mo"
 }
 
@@ -376,6 +386,38 @@ wait_playback_moving() {
   done
   say "WARN playback not confirmed moving within ${timeout_ms}ms — recording anyway"
   return 1
+}
+
+# Hold the capture gate until $1 ms of DEMO time has played, measured off the GSI
+# phase clock (flat while frozen), so a post-seek stall can't eat the pre-kill lead.
+wait_preroll() {
+  local want="$1" played=0 last_pe="" last_t=0 t0 now line pe age d
+  local cap_ms=$(( want + CLIP_UNBILLED_CAP_MS + 2000 ))
+  now_ms t0
+  while :; do
+    now_ms now
+    if [ $(( now - t0 )) -ge "$cap_ms" ]; then
+      say "WARN PREROLL: only ${played}ms of ${want}ms demo time after ${cap_ms}ms — opening the gate anyway"
+      return 1
+    fi
+    line=$(capture_fields_line "${SEG_POV_STEAMID:-}")
+    IFS='|' read -r _ pe _ age _ <<<"$line"
+    if [ -n "$pe" ] && { [ -n "$age" ] && [ "$age" -le 750 ]; } 2>/dev/null; then
+      if [ -n "$last_pe" ]; then
+        # Countdown drop since the last reading. A rise, or a drop bigger than the wall
+        # time between readings, is a countdown reset (freezetime end, bomb plant) — bill wall.
+        d=$(awk -v a="$last_pe" -v b="$pe" -v w="$(( now - last_t ))" \
+          'BEGIN{d=(a-b)*1000; printf "%d", ((d < 0 || d > w + 500) ? w : d)}')
+        played=$(( played + d ))
+      fi
+      last_pe="$pe"; last_t=$now
+      if [ "$played" -ge "$want" ]; then
+        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms"
+        return 0
+      fi
+    fi
+    sleep 0.05
+  done
 }
 
 log_state() {
@@ -918,6 +960,16 @@ warm_pipelines_if_cold() {
   say "WARM-UP: done â€” pipelines warmed for this cs2 process"
 }
 
+# Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
+# while paused. observer_slot may also have shifted. Verify via GSI like STEP 4b
+# instead of a fire-and-forget spec_post -- a silently missed re-press here is
+# what caused the wrong-POV ("mouse bug") clips.
+repress_pov_after_play() {
+  [ -n "${SEG_POV_STEAMID:-}" ] || return 0
+  verify_spec_lock "$SEG_POV_STEAMID" || true
+  say "STEP 5: after re-lock, GSI spectated=$(gsi_spectated_steamid)"
+}
+
 while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_START="${SEG_STARTS[$SEG_IDX]:-0}"
   SEG_END="${SEG_ENDS[$SEG_IDX]:-0}"
@@ -953,10 +1005,22 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # backward seek is absorbed by STEP 2/3/4 before capture (see the function note).
   warm_pipelines_if_cold "$SEG_START" "$SEG_DURATION_MS"
 
+  # Seek to SEG_PRE and play the pre-roll behind the closed start gate (vkcapture only;
+  # ximagesrc records from spawn, so it seeks straight to SEG_START as before).
+  SEG_PRE=$SEG_START
+  SEG_PREROLL_MS=0
+  if [ "${CLIP_PREROLL_MS:-0}" -gt 0 ] && [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] \
+     && [ "$VKCAP_FELL_BACK" = "0" ]; then
+    SEG_PRE=$(awk -v s="$SEG_START" -v ms="$CLIP_PREROLL_MS" -v r="${CLIP_TICK_RATE:-64}" \
+      'BEGIN{p=int(s - ms / 1000 * r); printf "%d", (p < 0 ? 0 : p)}')
+    SEG_PREROLL_MS=$(awk -v t="$((SEG_START - SEG_PRE))" -v r="${CLIP_TICK_RATE:-64}" \
+      'BEGIN{printf "%d", t / r * 1000}')
+  fi
+
   say "STEP 2: force-pause"
   spec_post /demo/pause '{"force": true}'
-  say "STEP 3: seek to $SEG_START"
-  spec_post /demo/seek "{\"tick\": ${SEG_START}}"
+  say "STEP 3: seek to $SEG_PRE (segment starts $SEG_START, pre-roll ${SEG_PREROLL_MS}ms)"
+  spec_post /demo/seek "{\"tick\": ${SEG_PRE}}"
   wait_seek_settled "STEP 3" || true
 
   # Lead-in: unpause so cs2 processes the seek + the spec lock (spec
@@ -979,11 +1043,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     say "STEP 4b: after lock, GSI spectated=$(gsi_spectated_steamid)"
   fi
 
-  # Re-pause + re-seek for a deterministic SEG_START (lead-in drifted
+  # Re-pause + re-seek for a deterministic SEG_PRE (lead-in drifted
   # forward). The re-seek resets cs2's POV, so we re-press the slot below.
   spec_post /demo/pause '{"force": true}'
-  spec_post /demo/seek "{\"tick\": ${SEG_START}}"
-  # Never record at an inherited timescale â€” stale 2x/4x = double-speed clips.
+  spec_post /demo/seek "{\"tick\": ${SEG_PRE}}"
+  # Never record at an inherited timescale — stale 2x/4x = double-speed clips.
   spec_post /demo/speed '{"rate": 1}'
   # The lead-in above played for 0.6s + the POV lock's polling, so this is a
   # LARGE backward seek — the slowest kind. Everything below (capture spawn,
@@ -1003,8 +1067,8 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   WALLCLOCK_DEADLINE_MS=$(awk -v w="$WALLCLOCK_MS" -v f="$CLIP_SEGMENT_TIMEOUT_FACTOR" \
     'BEGIN{printf "%d", w * f}')
 
-  # Start capture while the demo is still PAUSED at SEG_START, THEN press play.
-  # Recording therefore opens exactly at the pre-roll â€” previously we played
+  # Start capture while the demo is still PAUSED at SEG_PRE, THEN press play.
+  # Recording therefore opens exactly at the pre-roll — previously we played
   # first and only started capturing after wait-advancing + POV re-press + the
   # ~0.3s gst spawn, during which the demo drifted ~1-2s past SEG_START and ate
   # most of the 3s lead (the kill landed almost immediately). The capture arms
@@ -1012,11 +1076,21 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # demo is moving and opens its gate, so the SEG_START frame cs2 holds while it
   # digests a big backward unpause never reaches the mp4 (clips opened on a second
   # of statues). The ximagesrc fallback has no gate and still records it.
-  say "STEP 6: start capture (paused at $SEG_START) -> $SEG_FILE"
+  say "STEP 6: start capture (paused at $SEG_PRE) -> $SEG_FILE"
+  # The gate now also waits out the pre-roll; keep the consumer's record-anyway backstop past it.
+  export VKCAP_START_TIMEOUT_MS="${VKCAP_START_TIMEOUT_MS:-20000}"
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
+  if [ "$SEG_PREROLL_MS" -gt 0 ] && [ -z "${CLIP_CAPTURE_START_FILE:-}" ]; then
+    # Fell back to a gateless capture: it would record the pre-roll, so drop it.
+    say "WARN capture has no start gate — dropping the pre-roll, re-seeking to $SEG_START"
+    spec_post /demo/seek "{\"tick\": ${SEG_START}}"
+    wait_seek_settled "pre-roll drop" || true
+    SEG_PRE=$SEG_START
+    SEG_PREROLL_MS=0
+  fi
   # Spawning the capture is not the same as recording it: on the vkcapture path
   # cs2's obs-vkcapture layer retries connect() on a 1s cadence and the swapchain
   # handshake follows, so the first buffer can be ~0.5-2s out. Playing before
@@ -1029,27 +1103,24 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 5: PRESS PLAY (force-pause then toggle)"
   spec_post /demo/pause '{"force": true}'
   sleep 0.15
-  PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}") || PLAY_SIG_BEFORE=""
+  # GSI stops while paused, so this baseline is usually stale — that's fine: fresh
+  # GSI only resumes once the demo rolls, which is exactly what we wait for.
+  PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}" any) || PLAY_SIG_BEFORE=""
   spec_post /demo/toggle '{}'
 
   # The capture is armed but holding: open its gate only once the demo is really
   # rolling, so the clip opens on motion instead of on the frame cs2 holds while it
-  # digests the unpause. Skipped when GSI is stale — with no signal to wait for,
-  # blocking would just hold the gate through the whole timeout.
-  if [ -n "$PLAY_SIG_BEFORE" ]; then
-    wait_playback_moving "$PLAY_SIG_BEFORE" || true
-  else
-    say "STEP 5: GSI stale — opening the capture gate without a motion check"
-  fi
-  clip_capture_go
+  # digests the unpause.
+  wait_playback_moving "$PLAY_SIG_BEFORE" || true
 
-  # Re-press POV after play; the re-seek reset it and the pre-play re-press
-  # no-ops while paused. observer_slot may also have shifted. Verify via
-  # GSI like STEP 4b instead of a fire-and-forget spec_post -- a silently
-  # missed re-press here is what caused the wrong-POV ("mouse bug") clips.
-  if [ -n "${SEG_POV_STEAMID:-}" ]; then
-    verify_spec_lock "$SEG_POV_STEAMID" || true
-    say "STEP 5: after re-lock, GSI spectated=$(gsi_spectated_steamid)"
+  # With a pre-roll the POV re-press (and any camera settle) lands before the gate.
+  if [ "$SEG_PREROLL_MS" -gt 0 ]; then
+    repress_pov_after_play
+    wait_preroll "$SEG_PREROLL_MS" || true
+    clip_capture_go
+  else
+    clip_capture_go
+    repress_pov_after_play
   fi
   log_spec_slots "after-play"
 

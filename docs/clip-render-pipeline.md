@@ -97,7 +97,7 @@ sequenceDiagram
     participant C as capture consumer
 
     R->>S: STEP 2 force-pause
-    R->>S: STEP 3 seek to SEG_START
+    R->>S: STEP 3 seek to SEG_PRE (SEG_START - pre-roll)
     S-->>R: 200 (queued, not arrived)
     R->>R: wait_seek_settled (<=8s)
 
@@ -106,7 +106,7 @@ sequenceDiagram
     R->>S: STEP 4b lock POV to the kill's player
     R->>R: verify via GSI spectated_steam_id
 
-    R->>S: pause + seek to SEG_START again + speed 1
+    R->>S: pause + seek to SEG_PRE again + speed 1
     Note over R,S: large backward seek — the slowest kind
     R->>R: wait_seek_settled (<=8s)
     R->>S: STEP 4c re-press slot (re-seek reset the POV)
@@ -118,7 +118,9 @@ sequenceDiagram
 
     R->>S: STEP 5 force-pause, toggle play
     R->>R: wait_playback_moving (<=2.5s)
-    R->>C: clip_capture_go (start gate)
+    R->>S: re-press POV slot
+    R->>R: wait_preroll (2s of demo time, off the phase clock)
+    R->>C: clip_capture_go (start gate, at SEG_START)
     Note over C: recording begins HERE
 
     loop STEP 7, poll 150ms
@@ -145,7 +147,7 @@ through tick 0), solid = real playback.
    |         _.-*                   ,--'
    |     _.-'                   ,--'
  START *'         *===========*'
-   |   /\         /\           ^ gate opens (playback confirmed moving)
+   |   /\         /\           ^ gate opens after the pre-roll (demo back at START)
    |  /  \       /  \
    | /    \     /    \         *=====*  held paused (capture arming +
    |/      \   /      \                  CS2 digesting the unpause)
@@ -159,7 +161,7 @@ through tick 0), solid = real playback.
 | | |
 | --- | --- |
 | **Reaches the mp4** | Only the final play-through: from the moment the demo is confirmed moving, until the wall-clock budget is spent. |
-| **Never recorded** | Both backward seeks, the 0.6s lead-in, POV-lock polling, the capture handshake, and the frame CS2 holds while it digests the unpause. |
+| **Never recorded** | Both backward seeks, the 0.6s lead-in, POV-lock polling, the capture handshake, the frame CS2 holds while it digests the unpause, and the 2s pre-roll (smokes re-blooming, sound restarting and the POV re-press all settle there). |
 | **Recorded but not billed** | A mid-clip freeze, detected via a flat GSI phase clock, is withheld from the budget so the kill isn't cut off — capped at `CLIP_UNBILLED_CAP_MS` (2200ms). |
 
 ### The start gate
@@ -188,11 +190,12 @@ Nothing blocks forever. The standing rule is that a late clip beats no clip.
 | Gate | Signal | Ceiling | On expiry |
 | --- | --- | --- | --- |
 | Demo ready | GSI fired **and** `demoui_hidden` | `DEMO_READY_TIMEOUT` 300s | Fails the whole batch with a reason so the node frees instead of hanging. |
-| Seek settled | `/demo/seek-state` reports the gototick finished | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
+| Seek settled | `/demo/seek-state` reports the gototick finished (needs a post-landing GSI frame — the 1s GSI heartbeat provides one while paused) | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
 | POV locked | GSI `spectated_steam_id` matches the target | 2 tries | Re-presses the slot once, then proceeds on whatever POV CS2 has. |
 | Capture armed | Consumer's ready file appears | `CLIP_CAPTURE_READY_TIMEOUT_MS` 8s | Starts playback anyway — the opening frames won't be in the file. |
-| Playback moving | `phase_ends_in` or `world_motion` changes after the unpause | `CLIP_PLAY_CONFIRM_TIMEOUT_MS` 2.5s | Opens the gate regardless. Skipped outright when GSI is stale (no signal to wait for). |
-| Start gate backstop | Consumer polls for the go file each frame | `VKCAP_START_TIMEOUT_MS` 10s | Records anyway, so a renderer that never signals yields a late clip rather than an empty one. |
+| Playback moving | Fresh GSI whose `phase_ends_in`/`world_motion` differ from the pre-unpause values (GSI stops while paused, so fresh GSI itself means rolling) | `CLIP_PLAY_CONFIRM_TIMEOUT_MS` 2.5s | Continues to the pre-roll regardless. |
+| Pre-roll | `CLIP_PREROLL_MS` (2s) of demo time off the `phase_ends_in` countdown — a flat clock (post-seek stall) isn't counted | pre-roll + `CLIP_UNBILLED_CAP_MS` + 2s | Opens the gate anyway. vkcapture only; `CLIP_PREROLL_MS=0` restores gate-at-START. |
+| Start gate backstop | Consumer polls for the go file each frame | `VKCAP_START_TIMEOUT_MS` 20s | Records anyway, so a renderer that never signals yields a late clip rather than an empty one. |
 | Segment budget | Wall clock, billed per 150ms poll | `CLIP_SEGMENT_TIMEOUT_FACTOR` 2x duration | Hard stop for a wedged demo, tight enough that a misfire can't run deep into the next round. |
 | Capture drain | SIGINT → EOS → qtmux writes the moov atom | 15s | Polls at 100ms; every extra poll is dead time between segments. |
 

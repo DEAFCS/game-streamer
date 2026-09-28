@@ -103,6 +103,8 @@ read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
+// TrueView off for live spectating too (cs2 2026-09-23+ cvar): smooth beats pixel-perfect.
+cl_spectator_predict 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
