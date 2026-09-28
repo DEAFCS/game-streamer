@@ -347,13 +347,7 @@ done
 timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
 
 if hud_running; then
-  # Forward HUD_MODE as the variant â€” omitting it resets the boot-
-  # time variant the auto-overlay set.
-  curl -fsS -m 5 -X POST -o /dev/null \
-       -H 'content-type: application/json' \
-       --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
-       "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
-    || warn "/api/overlay/start failed"
+  reload_hud_overlay
 fi
 
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then

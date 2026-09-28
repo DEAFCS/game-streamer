@@ -264,13 +264,7 @@ if hud_running; then
   # Fire-and-forget the overlay/start â€” the previous (early) call from
   # cfg-prep already kicked it. We're not gating capture on this any
   # more; the prior shape held everything up if hud-manager was slow.
-  # Forward HUD_MODE as the variant â€” omitting it resets the boot-
-  # time variant the auto-overlay set.
-  ( curl -fsS -m 5 -X POST -o /dev/null \
-         -H 'content-type: application/json' \
-         --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
-         "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
-      || warn "/api/overlay/start failed" ) &
+  reload_hud_overlay &
   # Position synchronously so the very first captured frame already
   # has the overlay composited. position_hud_overlay has its own
   # 30s timeout, so it can't stall the broadcast.

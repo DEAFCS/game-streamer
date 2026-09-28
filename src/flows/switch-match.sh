@@ -41,11 +41,7 @@ log "pivoting pod: ${OLD_MATCH_ID:-<none>} -> $MATCH_ID (mode=$MODE)"
 if hud_running; then
   log "reseeding HUD for $MATCH_ID"
   seed_hud_db "$MATCH_ID" || warn "seed_hud_db returned non-zero"
-  curl -fsS -m 5 -X POST -o /dev/null \
-       -H 'content-type: application/json' \
-       --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
-       "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
-    || warn "/api/overlay/start failed"
+  reload_hud_overlay
 fi
 
 log "rebinding status-reporter to $MATCH_ID"

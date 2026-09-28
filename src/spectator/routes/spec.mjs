@@ -120,17 +120,19 @@ export async function hudHandler(_req, res, body) {
   sendJson(res, 200, { ok: true, visible, window: overlayId });
 }
 
-// Variant currently shown on the overlay. Seeded from the pod's
-// HUD_MODE (the api-resolved default that hud-manager.sh forwards as
-// HUD_VARIANT) and updated whenever the operator switches mode below,
-// so hudReloadHandler can rebuild the same layout.
-let activeHudVariant = process.env.HUD_VARIANT || process.env.HUD_MODE || "horizontal";
+// The boot auto-overlay always opens the builtin; an imported HUD only becomes
+// active once installBundle has put it on disk.
+let activeHudId = "default";
+let activeHudVariant = process.env.HUD_MODE || "horizontal";
 
-async function startDefaultOverlay(variant) {
+const HUD_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LEGACY_HUD_MODES = new Set(["default", "horizontal", "vertical"]);
+
+async function startOverlay(hudId, variant) {
   const r = await fetch(`http://${HUD_HOST}:${HUD_PORT}/api/overlay/start`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ hudId: "default", variant }),
+    body: JSON.stringify({ hudId, variant }),
   });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
@@ -139,44 +141,94 @@ async function startDefaultOverlay(variant) {
   return { ok: true };
 }
 
-// "mode" here maps to a HUD variant — JTs Hud's default bundle
-// declares ["default","horizontal","vertical"] in its hud.json and
-// switches layout based on the `?variant=` query param (see the admin
-// renderer's HudCard.vue buildUrl/launchHud). There's still only one
-// HUD id on disk (`default`); horizontal/vertical are not separate
-// HUD directories, so this must NOT be sent as `hudId`.
+// JTHud picks the installed id itself (the top-level folder, else the posted
+// filename), so the id is read back from its response rather than assumed.
+async function installBundle(bundleUrl, slug) {
+  const archive = await fetch(bundleUrl, { signal: AbortSignal.timeout(120_000) });
+  if (!archive.ok) {
+    throw new Error(`bundle fetch failed: ${archive.status}`);
+  }
+
+  const form = new FormData();
+  form.append(
+    "hud",
+    new Blob([await archive.arrayBuffer()], { type: "application/zip" }),
+    `${slug}.zip`,
+  );
+
+  const installed = await fetch(
+    `http://${HUD_HOST}:${HUD_PORT}/api/huds/upload-zip`,
+    { method: "POST", body: form, signal: AbortSignal.timeout(60_000) },
+  );
+  if (!installed.ok) {
+    const text = await installed.text().catch(() => "");
+    throw new Error(`upload-zip -> ${installed.status}: ${text.slice(0, 200)}`);
+  }
+
+  const body = await installed.json().catch(() => ({}));
+  if (typeof body?.id !== "string" || !body.id) {
+    throw new Error("upload-zip returned no hud id");
+  }
+  return body.id;
+}
+
 export async function hudModeHandler(_req, res, body) {
-  const mode = typeof body.mode === "string" ? body.mode : null;
-  const ALLOWED = new Set(["default", "horizontal", "vertical"]);
-  if (!mode || !ALLOWED.has(mode)) {
-    sendJson(res, 400, { error: "mode must be one of default|horizontal|vertical" });
+  let hudId = typeof body.hudId === "string" && body.hudId ? body.hudId : null;
+  let variant = typeof body.variant === "string" ? body.variant : "";
+  const slug = typeof body.slug === "string" ? body.slug : "";
+  const bundleUrl =
+    typeof body.bundleUrl === "string" && body.bundleUrl ? body.bundleUrl : null;
+
+  if (!hudId) {
+    const mode = typeof body.mode === "string" ? body.mode : null;
+    if (!mode || !LEGACY_HUD_MODES.has(mode)) {
+      sendJson(res, 400, {
+        error: "send a hudId, or a mode of default|horizontal|vertical",
+      });
+      return;
+    }
+    hudId = "default";
+    variant = mode;
+  }
+
+  if (bundleUrl && !HUD_SLUG_RE.test(slug)) {
+    sendJson(res, 400, { error: "a bundleUrl needs a valid slug" });
     return;
   }
+
   try {
-    const r = await startDefaultOverlay(mode);
+    // Reinstall on every switch: two imports can share a JTHud id, and
+    // upload-zip overwrites it in place.
+    if (bundleUrl) {
+      hudId = await installBundle(bundleUrl, slug);
+    }
+
+    const r = await startOverlay(hudId, variant);
     if (!r.ok) {
       sendJson(res, 502, { error: "hud-manager rejected overlay/start", status: r.status, body: r.body });
       return;
     }
-    activeHudVariant = mode;
-    sendJson(res, 200, { ok: true, mode });
+
+    activeHudId = hudId;
+    activeHudVariant = variant;
+    sendJson(res, 200, { ok: true, hudId, variant });
   } catch (err) {
-    sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
+    sendJson(res, 502, { error: "hud switch failed", detail: String(err) });
   }
 }
 
-// Rebuild the overlay BrowserWindow against the current variant — a
+// Rebuild the overlay BrowserWindow against whatever is currently shown — a
 // fresh page load that re-fetches player metadata and images. Lets
 // operators push a mid-match image swap to the live HUD without
 // flipping layouts (previously the only way to force a reload).
 export async function hudReloadHandler(_req, res, _body) {
   try {
-    const r = await startDefaultOverlay(activeHudVariant);
+    const r = await startOverlay(activeHudId, activeHudVariant);
     if (!r.ok) {
       sendJson(res, 502, { error: "hud-manager rejected overlay/start", status: r.status, body: r.body });
       return;
     }
-    sendJson(res, 200, { ok: true, variant: activeHudVariant });
+    sendJson(res, 200, { ok: true, hudId: activeHudId, variant: activeHudVariant });
   } catch (err) {
     sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
   }

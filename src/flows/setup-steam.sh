@@ -137,6 +137,7 @@ if [ "$HUD_DEFERRED" = "1" ]; then
     wait_for_hud_server 30 || true
   fi
   if hud_server_up; then
+    install_custom_hud || true
     hide_hud_admin_window
     position_hud_overlay || warn "early overlay positioning failed â€” will retry after cs2"
   else
@@ -166,14 +167,7 @@ if [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
       # Batch-highlights doesn't run hud-manager at all, so the kick
       # would just spam Connection refused.
       if [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
-        # Forward the api-resolved HUD_MODE as the variant â€” without it
-        # this call rebuilds the overlay with an empty `?variant=` and
-        # silently resets the boot-time variant the auto-overlay set.
-        curl -fsS -m 5 -X POST -o /dev/null \
-             -H 'content-type: application/json' \
-             --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
-             "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
-          || warn "early /api/overlay/start failed (will retry after cs2)"
+        reload_hud_overlay
       fi
     else
       : > "$LOG_DIR/match-cfgs-failed"
