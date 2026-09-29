@@ -44,6 +44,7 @@ start_status_reporter
 # capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
 # (drops, no dups) â€” headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
+# Clip jobs re-cap cs2 to their capture rate once the demo is loaded (inline-clip-render.sh STEP 1c).
 : "${CS2_FPS_MAX:=120}"
 # TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
 # Off by default: it made playback jitter, showed predicted shots early and dropped
@@ -152,9 +153,6 @@ read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
-// Demo playback isn't a real server, so these aren't sv_cheats-gated.
-cl_drawhud 0
-r_drawviewmodel 0
 cl_show_observer_crosshair 0
 // cl_demo_predict is env-tunable via CS2_DEMO_PREDICT (injected into
 // live_autoexec below), not pinned here.
