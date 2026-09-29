@@ -390,8 +390,10 @@ wait_playback_moving() {
 
 # Hold the capture gate until $1 ms of DEMO time has played, measured off the GSI
 # phase clock (flat while frozen), so a post-seek stall can't eat the pre-kill lead.
+# $2/$3 = the paused clock value and the unpause time, so the demo time spent on the
+# motion check and POV re-press counts too.
 wait_preroll() {
-  local want="$1" played=0 last_pe="" last_t=0 t0 now line pe age d
+  local want="$1" played=0 last_pe="${2:-}" last_t="${3:-0}" t0 now line pe age d
   local cap_ms=$(( want + CLIP_UNBILLED_CAP_MS + 2000 ))
   now_ms t0
   while :; do
@@ -1106,6 +1108,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # GSI stops while paused, so this baseline is usually stale — that's fine: fresh
   # GSI only resumes once the demo rolls, which is exactly what we wait for.
   PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}" any) || PLAY_SIG_BEFORE=""
+  now_ms PLAY_T0
   spec_post /demo/toggle '{}'
 
   # The capture is armed but holding: open its gate only once the demo is really
@@ -1116,13 +1119,14 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # With a pre-roll the POV re-press (and any camera settle) lands before the gate.
   if [ "$SEG_PREROLL_MS" -gt 0 ]; then
     repress_pov_after_play
-    wait_preroll "$SEG_PREROLL_MS" || true
+    log_spec_slots "after-play"
+    wait_preroll "$SEG_PREROLL_MS" "${PLAY_SIG_BEFORE%%|*}" "$PLAY_T0" || true
     clip_capture_go
   else
     clip_capture_go
     repress_pov_after_play
+    log_spec_slots "after-play"
   fi
-  log_spec_slots "after-play"
 
   # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
   # forced to 1, so wall-time == demo-time once playing (we opened the capture
