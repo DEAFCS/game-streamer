@@ -150,7 +150,8 @@ process_batch_jobs() {
   # Fresh cs2 process for this batch â†’ its Vulkan pipelines are cold again. Drop
   # the warm marker so inline-clip-render re-warms on the first segment (see
   # warm_pipelines_if_cold). Keep the path in sync with CLIP_WARMUP_MARKER there.
-  rm -f "${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}"
+  rm -f "${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}" \
+        "${CLIP_DEMOUI_MARKER:-/tmp/game-streamer/.demoui-verified}"
 
   local count
   count=$(printf '%s' "$CLIP_BATCH_JOBS" | node "$CLIP_HELPERS" jobs-count)

@@ -422,6 +422,31 @@ wait_preroll() {
   done
 }
 
+# Log whether cs2's demo bar is on screen right now; echoes 1 when it is.
+demoui_probe() {
+  local line
+  line=$(curl --fail --silent --max-time 8 "${SPEC_SERVER_URL}/demo/demoui-score" || echo "?|?|?")
+  say "DEMOUI [$1]: visible|score|brightness = ${line}"
+  printf '%s' "${line%%|*}"
+}
+
+# Last check before recording: the bar can open after the start-of-demo hide (e.g. on a
+# slow box), so close it here if it's showing. Once seen closed it stays closed for this
+# cs2 process, so later segments and jobs skip the grab (marker reset by batch-highlights).
+DEMOUI_MARKER="${CLIP_DEMOUI_MARKER:-/tmp/game-streamer/.demoui-verified}"
+hide_demoui_before_recording() {
+  [ -f "$DEMOUI_MARKER" ] && return 0
+  local tries=0 shown
+  while :; do
+    shown=$(demoui_probe "seg${SEG_IDX} pre-gate")
+    { [ "$shown" = "1" ] && [ "$tries" -lt 3 ]; } || break
+    spec_post /demo/exec '{"cmd": "demoui"}'
+    tries=$((tries + 1))
+    sleep 0.8
+  done
+  if [ "$shown" = "0" ]; then : > "$DEMOUI_MARKER"; fi
+}
+
 log_state() {
   local label="$1"
   local s tick paused motion slots spectated
@@ -1109,6 +1134,8 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
 
   # Force-pause then toggle â†’ deterministic PLAYING (a bare relative toggle
   # could pause a demo the re-seek left playing).
+  # No pre-roll to hide it in, so check while still paused (costs no lead).
+  [ "$SEG_PREROLL_MS" -gt 0 ] || hide_demoui_before_recording
   say "STEP 5: PRESS PLAY (force-pause then toggle)"
   spec_post /demo/pause '{"force": true}'
   sleep 0.15
@@ -1126,6 +1153,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # With a pre-roll the POV re-press (and any camera settle) lands before the gate.
   if [ "$SEG_PREROLL_MS" -gt 0 ]; then
     repress_pov_after_play
+    hide_demoui_before_recording
     log_spec_slots "after-play"
     wait_preroll "$SEG_PREROLL_MS" "${PLAY_SIG_BEFORE%%|*}" "$PLAY_T0" || true
     clip_capture_go

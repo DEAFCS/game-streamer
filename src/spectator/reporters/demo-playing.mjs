@@ -1,6 +1,7 @@
 import process from "node:process";
 import { readFileSync } from "node:fs";
 
+import { hideDemoui } from "../cs2/demoui.mjs";
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { DEMO_SESSION_ID, STATUS_ACK_FILE, STATUS_API_BASE } from "../env.mjs";
 import { demoState } from "../state/demo.mjs";
@@ -34,28 +35,35 @@ export async function reportDemoPlayingOnce() {
   // from 0 keeps the estimate honest (freezetime anchors absorb drift),
   // and a demo_pause here raced cs2's not-yet-interactable window anyway.
   //
-  // GSI lands AFTER the demoui panel renders; defer so the toggle
-  // actually flips visible → hidden instead of no-op'ing pre-paint.
-  // 500ms was tested and the demoui panel was still showing up in
-  // captured clips — cs2 needs this full ~3s window between GSI's
-  // first map-phase event and the panel being interactable.
-  setTimeout(async () => {
-    const ok = await execCfgCommand("demoui").catch(() => false);
-    if (ok) {
-      playingState.demouiHidden = true;
-      return;
-    }
-    process.stderr.write(
-      "[spec-server] demoui hide command failed to send — retrying once\n",
-    );
-    const retryOk = await execCfgCommand("demoui").catch(() => false);
-    if (!retryOk) {
+  // Clip batches watch the screen and toggle only while the bar is really showing, so a
+  // slow box that opens it late can't leave it stuck open. Streaming keeps the timed
+  // toggle: its HUD window sits over cs2 and would muddy the screen grab.
+  if (process.env.CLIP_BATCH_MODE === "1") {
+    hideDemouiWhenShowing(generation);
+  } else {
+    // GSI lands AFTER the demoui panel renders; defer so the toggle
+    // actually flips visible → hidden instead of no-op'ing pre-paint.
+    // 500ms was tested and the demoui panel was still showing up in
+    // captured clips — cs2 needs this full ~3s window between GSI's
+    // first map-phase event and the panel being interactable.
+    setTimeout(async () => {
+      const ok = await execCfgCommand("demoui").catch(() => false);
+      if (ok) {
+        playingState.demouiHidden = true;
+        return;
+      }
       process.stderr.write(
-        "[spec-server] demoui hide retry failed — proceeding anyway (cs2 not running?)\n",
+        "[spec-server] demoui hide command failed to send — retrying once\n",
       );
-    }
-    playingState.demouiHidden = true;
-  }, 3000);
+      const retryOk = await execCfgCommand("demoui").catch(() => false);
+      if (!retryOk) {
+        process.stderr.write(
+          "[spec-server] demoui hide retry failed — proceeding anyway (cs2 not running?)\n",
+        );
+      }
+      playingState.demouiHidden = true;
+    }, DEMOUI_BLIND_TOGGLE_MS);
+  }
 
   demoState.paused         = false;
   demoState.lastTickAtSeek = 0;
@@ -74,6 +82,16 @@ function liveAcked() {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const DEMOUI_BLIND_TOGGLE_MS = 3_000;
+
+function hideDemouiWhenShowing(mine) {
+  const isCurrent = () => mine === generation;
+  void hideDemoui({
+    toggle: () => execCfgCommand("demoui").catch(() => undefined),
+    isCurrent,
+  }).finally(() => { if (isCurrent()) playingState.demouiHidden = true; });
+}
 
 // GSI flows as soon as cs2 has the demo loaded, which is routinely BEFORE
 // run-demo.sh finishes start_capture and its `live` reaches the api through
