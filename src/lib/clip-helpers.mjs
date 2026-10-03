@@ -229,6 +229,14 @@ switch (subcmd) {
   }
 
   // [stdin: CLIP_BATCH_JOBS] -> JSON of jobs[argv[0]]. Exits 1 if oob.
+  // [stdin: CLIP_BATCH_JOBS] -> the first job's output fps (60 when missing).
+  case "jobs-fps": {
+    const d = readStdinJson();
+    const fps = parseInt((Array.isArray(d) ? d[0] : null)?.spec?.output?.fps, 10);
+    process.stdout.write(String(Number.isFinite(fps) ? fps : 60));
+    break;
+  }
+
   case "jobs-at": {
     const idx = Number(args[0]);
     const d = readStdinJson();

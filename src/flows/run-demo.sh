@@ -44,8 +44,13 @@ start_status_reporter
 # capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
 # (drops, no dups) â€” headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
-# Clip jobs re-cap cs2 to their capture rate once the demo is loaded (inline-clip-render.sh STEP 1c).
+# Clip batches launch at the clip rate instead: cs2 ignores a later fps_max.
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -z "${CS2_FPS_MAX:-}" ]; then
+  CS2_FPS_MAX=$(printf '%s' "${CLIP_BATCH_JOBS:-}" | node "$LIB_DIR/clip-helpers.mjs" jobs-fps)
+fi
 : "${CS2_FPS_MAX:=120}"
+export CS2_FPS_MAX
+log "render cap: fps_max ${CS2_FPS_MAX}"
 # TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
 # Off by default: it made playback jitter, showed predicted shots early and dropped
 # the POV player's own gunshots. Smooth beats pixel-perfect.

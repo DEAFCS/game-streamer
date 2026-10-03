@@ -692,12 +692,14 @@ api_status "status=rendering" "progress=0.05"
 say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
 spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
 
-# Render at this job's capture rate (30 or 60): above it cs2 wanders (e.g. 90-120fps for a
-# 60fps capture), so captured frames land one or two renders apart and motion steps unevenly.
-# Set per job, after load, so boot and the demoui hide keep the launch cap.
-CLIP_FPS_MAX="${CLIP_FPS_MAX:-${CLIP_OUTPUT_FPS:-60}}"
-say "STEP 1c: render cap fps_max ${CLIP_FPS_MAX} (output ${CLIP_OUTPUT_FPS:-60}fps)"
-spec_post /demo/exec "{\"cmd\": \"fps_max ${CLIP_FPS_MAX}\"}"
+# cs2 should render at the capture rate: above it (e.g. 90-120fps for a 60fps capture)
+# captured frames land one or two renders apart and motion steps unevenly. The cap is set
+# at launch (run-demo.sh) because cs2 ignores a runtime fps_max.
+if [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
+  say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"
+else
+  say "STEP 1c: WARN render cap fps_max ${CS2_FPS_MAX:-?} != output ${CLIP_OUTPUT_FPS:-60}fps — expect uneven motion"
+fi
 
 DEMO_TOTAL_TICKS_FOR_GUARD="${CLIP_DEMO_TOTAL_TICKS:-}"
 if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ]; then
