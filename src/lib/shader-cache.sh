@@ -117,6 +117,7 @@ shader_progress_reset() {
   f="$(shader_log_file)"
   _SHADER_LOG_OFFSET=$(stat -c %s "$f" 2>/dev/null || echo 0)
   _SHADER_LAST_REPORT=""
+  _SHADER_BAR_SHOWN=""
 }
 
 # Report compile progress; return 0 while actively compiling, else 1. Called
@@ -143,10 +144,21 @@ shader_report_progress() {
   if [ "$precise" != "${_SHADER_LAST_REPORT:-}" ]; then
     _SHADER_LAST_REPORT="$precise"
     log "processing Vulkan shaders: ${precise}% (${compiled}/${total})"
-    # progress_stage carries the raw count for the UI (rendered in parens,
-    # stored in status_history â€” no web/api change needed).
-    report_status status=processing_shaders progress="$precise" \
-      progress_stage="${compiled} / ${total}" >/dev/null 2>&1 || true
+    # Steam replays its whole pipeline list on every boot, so "0 / 26,325" with a
+    # progress bar looked like hours of compiling ahead — when the pipelines were
+    # already in the driver cache and it finished in seconds. Until Steam reports real
+    # progress, say we're verifying the cache with no bar (the status stays
+    # launching_cs2); a cached node never shows the bar at all.
+    if [ "${compiled:-0}" -eq 0 ] && [ -z "${_SHADER_BAR_SHOWN:-}" ]; then
+      report_status status=launching_cs2 progress_stage="verifying shader cache" \
+        >/dev/null 2>&1 || true
+    else
+      _SHADER_BAR_SHOWN=1
+      # progress_stage carries the raw count for the UI (rendered in parens,
+      # stored in status_history — no web/api change needed).
+      report_status status=processing_shaders progress="$precise" \
+        progress_stage="${compiled} / ${total}" >/dev/null 2>&1 || true
+    fi
   fi
 
   local now mtime age
