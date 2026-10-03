@@ -1037,6 +1037,9 @@ set_cs2_launch_options() {
   case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
     vkcapture) cap_env="OBS_VKCAPTURE=1 " ;;
   esac
+  # Only the enable flag: Steam sets __GL_SHADER_DISK_CACHE_PATH to its own per-game
+  # dir (steamapps/shadercache/730), which Fossilize pre-warms. Overriding the path
+  # pointed cs2 at an empty cache — map load went 8s -> 2.5min and every clip compiled cold.
   local launch_opts="${CS2_LAUNCH_OPTIONS:-__GL_SHADER_DISK_CACHE=1 ${cap_env}%command%}"
   local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
   local seen=() root user_dir steamid edited=0

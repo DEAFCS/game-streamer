@@ -196,7 +196,91 @@ CLIP_REACHED_TERMINAL=0
 
 SAVED_TICK=""
 SAVED_PAUSED=""
+
+# Fixed timestep: while a segment records, cs2 advances exactly 1/fps of demo time per
+# rendered frame (host_framerate) instead of its measured frame time, so a render
+# spike can't make the world jump or the capture repeat a frame. Only with a capture
+# that stamps frames by count (CLIP_CAPTURE_FIXED_TIMESTEP, see clip-capture.sh).
+FIXED_TIMESTEP_ON=0
+HOST_FR_CHECK_OFFSET=""   # console.log offset of the first enable; cleared once reported
+set_fixed_timestep() {
+  local fps="$1"
+  if [ "$fps" = "0" ]; then
+    [ "$FIXED_TIMESTEP_ON" = "1" ] || return 0
+    spec_post /demo/exec '{"cmd": "host_framerate 0"}'
+    FIXED_TIMESTEP_ON=0
+  else
+    # First enable of the job also queries the cvar (bare name), so the console echo
+    # proves cs2 accepted it — see report_host_framerate.
+    local query=""
+    if [ -z "$HOST_FR_CHECK_OFFSET" ]; then
+      HOST_FR_CHECK_OFFSET=$(wc -c < "${CS2_DIR}/game/csgo/console.log" 2>/dev/null || echo 0)
+      HOST_FR_CHECK_OFFSET="${HOST_FR_CHECK_OFFSET//[!0-9]/}"; HOST_FR_CHECK_OFFSET="${HOST_FR_CHECK_OFFSET:-0}"
+      query="; host_framerate"
+    fi
+    spec_post /demo/exec "{\"cmd\": \"sv_cheats 1; host_framerate ${fps}${query}\"}"
+    FIXED_TIMESTEP_ON=1
+  fi
+}
+
+# Once per job: echo cs2's console lines about host_framerate since the first enable
+# (the value it reports, or an unknown-command / cheat-protected rejection). Without
+# it taking effect the pacing alone still holds 60, but spikes move the world again.
+report_host_framerate() {
+  [ -n "$HOST_FR_CHECK_OFFSET" ] && [ "$HOST_FR_CHECK_OFFSET" != "done" ] || return 0
+  local lines
+  lines=$(tail -c "+$((HOST_FR_CHECK_OFFSET + 1))" "${CS2_DIR}/game/csgo/console.log" 2>/dev/null \
+    | grep -a 'host_framerate' | tail -4) || true
+  if [ -n "$lines" ]; then
+    while IFS= read -r l; do say "  host_framerate console: ${l}"; done <<<"$lines"
+  else
+    say "  host_framerate console: no echo yet (console.log may be buffered)"
+  fi
+  HOST_FR_CHECK_OFFSET="done"
+}
+
+# With a fixed timestep the video runs on game time and the pulsesrc audio on wall
+# time. The layer's pacing keeps them together, but a render stall it can't catch up
+# leaves the video short of the wall clock, so stretch the audio by wall/video
+# (atempo, pitch-preserving) when they differ by more than ~2 frames. The spans come
+# from the consumer (timing file), not the container durations, whose start/stop
+# tails differ by a few tens of ms even when nothing drifted.
+retime_segment_audio() {
+  local f="$1" timing="$2" video_ns wall_ns tempo tmp="${1}.retime.mp4"
+  if [ -z "$timing" ] || [ ! -s "$timing" ]; then
+    say "  audio retime: no timing from the capture — skipped"
+    return 0
+  fi
+  video_ns=$(sed -n 's/.*video_ns=\([0-9]*\).*/\1/p' "$timing")
+  wall_ns=$(sed -n 's/.*wall_ns=\([0-9]*\).*/\1/p' "$timing")
+  if [ -z "$video_ns" ] || [ -z "$wall_ns" ] || [ "$video_ns" = "0" ]; then
+    say "  audio retime: unreadable timing ($(cat "$timing" 2>/dev/null)) — skipped"
+    return 0
+  fi
+  tempo=$(awk -v v="$video_ns" -v w="$wall_ns" 'BEGIN{
+    d = v - w; if (d < 0) d = -d
+    r = w / v
+    if (d <= 35e6) { print "sync"; exit }
+    if (r < 0.5 || r > 2.0) { print "range"; exit }
+    printf "%.6f", r }')
+  local spans="video=$((video_ns / 1000000))ms wall=$((wall_ns / 1000000))ms"
+  case "$tempo" in
+    sync)  say "  audio retime: ${spans} — in sync"; return 0 ;;
+    range) say "  WARN audio retime: ${spans} — ratio outside atempo range, left as captured"; return 0 ;;
+  esac
+  say "  audio retime: ${spans} -> atempo=${tempo}"
+  if ffmpeg -y -hide_banner -loglevel warning -i "$f" \
+       -map 0:v -c:v copy -map 0:a -af "atempo=${tempo}" -c:a aac -b:a 192k \
+       -movflags +faststart "$tmp"; then
+    mv -f "$tmp" "$f"
+  else
+    rm -f "$tmp"
+    say "  WARN audio retime failed — keeping the raw segment"
+  fi
+}
+
 restore_user_playback() {
+  set_fixed_timestep 0
   if [ -z "$SAVED_TICK" ]; then return 0; fi
   spec_post /demo/pause '{"force": true}'
   spec_post /demo/seek "{\"tick\": ${SAVED_TICK}}"
@@ -326,15 +410,19 @@ seek_in_progress() {
 # has not started, so no frames are produced while we wait.
 wait_seek_settled() {
   local label="${1:-seek}"
-  local timeout_ms="${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}"
-  local waited=0
+  local timeout_ms="${2:-${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}}"
+  local t0 now waited=0
+  now_ms t0
+  # Real elapsed time: each poll also spends ~30ms in curl, so counting 100ms per
+  # sleep let an "8s" ceiling run ~10s.
   while [ "$waited" -lt "$timeout_ms" ]; do
     if [ "$(seek_in_progress)" != "1" ]; then
       [ "$waited" -gt 0 ] && say "  ${label}: seek settled after ${waited}ms"
       return 0
     fi
     sleep 0.1
-    waited=$((waited + 100))
+    now_ms now
+    waited=$((now - t0))
   done
   say "WARN ${label}: seek still settling after ${timeout_ms}ms — proceeding anyway"
   return 1
@@ -413,8 +501,10 @@ wait_preroll() {
         played=$(( played + d ))
       fi
       last_pe="$pe"; last_t=$now
-      if [ "$played" -ge "$want" ]; then
-        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms"
+      # The reading is $age ms old and the demo kept playing since (at 1x): count it,
+      # or the gate opens up to that much late (readings up to 750ms old are taken).
+      if [ $(( played + age )) -ge "$want" ]; then
+        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms (last reading ${age}ms old)"
         return 0
       fi
     fi
@@ -604,7 +694,29 @@ has_audio_stream() {
 # (gst + ffmpeg); downgrade to h264 if either is missing.
 CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h264}"
 # yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
-H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
+# The delivered encode. NVENC (p6/hq, spatial+temporal AQ, lookahead, B-frames as
+# references) at a target bitrate around what the old libx264 veryfast/crf 22 made
+# (~8-9Mbps, ~30MB for a 25s clip) — same size, cleaner, and about twice as fast.
+# Constant quality 19 tripled the size without a visible difference. NVENC is checked
+# with a tiny test encode; the old libx264 encode is the fallback.
+# CLIP_FINAL_BITRATE / CLIP_FINAL_MAXRATE tune it; CLIP_FINAL_ENCODER=x264 forces libx264.
+H264_X264_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
+H264_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
+  -b:v "${CLIP_FINAL_BITRATE:-9M}" -maxrate "${CLIP_FINAL_MAXRATE:-14M}" -bufsize "${CLIP_FINAL_BUFSIZE:-18M}"
+  -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle
+  -pix_fmt yuv420p -profile:v high -level 4.2)
+# True when ffmpeg can encode with these args on this node (driver, GPU, options).
+ffmpeg_venc_ok() {
+  ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 \
+    -frames:v 8 "$@" -f null - >/dev/null 2>&1
+}
+if [ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && ffmpeg_venc_ok "${H264_NVENC_ARGS[@]}"; then
+  H264_VENC_ARGS=("${H264_NVENC_ARGS[@]}")
+  say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})"
+else
+  H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
+  say "final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
+fi
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
     GST_H265_OK=0
@@ -690,12 +802,20 @@ api_status "status=rendering" "progress=0.05"
 # what binds F5 -> spec_autodirector 0. The cvar persists across seeks,
 # so once before the segment loop is enough.
 say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
-spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
+# host_framerate 0: a job killed mid-segment can't leave cs2 on a fixed timestep
+# through this job's seeks and lead-ins (it's only set while a segment records).
+spec_post /demo/exec '{"cmd": "spec_autodirector 0; host_framerate 0"}'
 
-# cs2 should render at the capture rate: above it (e.g. 90-120fps for a 60fps capture)
-# captured frames land one or two renders apart and motion steps unevenly. The cap is set
-# at launch (run-demo.sh) because cs2 ignores a runtime fps_max.
-if [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
+# Fixed timestep / grid pacing (CLIP_FIXED_TIMESTEP / CLIP_PACE): the capture layer paces cs2 to exactly the output rate
+# while recording, so fps_max only needs headroom above it (run-demo.sh sets 2x).
+# Without it cs2 should render at the capture rate: above it captured frames land one
+# or two renders apart and motion steps unevenly. The cap is set at launch
+# (run-demo.sh) because cs2 ignores a runtime fps_max.
+if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
+  say "STEP 1c: fixed timestep — host_framerate ${CLIP_OUTPUT_FPS:-60} + layer pacing while recording (fps_max ${CS2_FPS_MAX:-?})"
+elif [ "${CLIP_PACE:-1}" = "1" ]; then
+  say "STEP 1c: grid pacing — layer paces to ${CLIP_OUTPUT_FPS:-60}fps while recording, game clock untouched (fps_max ${CS2_FPS_MAX:-?})"
+elif [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
   say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"
 else
   say "STEP 1c: WARN render cap fps_max ${CS2_FPS_MAX:-?} != output ${CLIP_OUTPUT_FPS:-60}fps — expect uneven motion"
@@ -809,20 +929,28 @@ fi
 #    before the loop; there it's pinned to the capture cores + nice 19 (never touches
 #    cs2's render cores 0-9; below the capture consumer). Affinity+nice are inherited
 #    by the Chromium children.
-# Idempotent â€” launches at most once per job (CHIP_LAUNCHED guard).
+#  - After recording (start_chip_render after), nothing is capturing and cs2 sits
+#    paused, so it runs on every core. Pinned to the 2 capture cores it took ~47s per
+#    clip, all of it dead time before STEP 9.
+# Idempotent — launches at most once per job (CHIP_LAUNCHED guard).
 start_chip_render() {
   [ "${CHIP_READY_TO_RENDER:-0}" = "1" ] || return 0
   [ "${CHIP_LAUNCHED:-0}" = "1" ] && return 0
   CHIP_LAUNCHED=1
-  compute_cpu_split
-  local pin=()
-  if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
-    pin=(taskset -c "$GS_CAPTURE_CPUS")
+  local pin=() niceness=19
+  if [ "${1:-}" = after ]; then
+    niceness=5
+    say "CHIP: rendering for '${CHIP_NAME}' (recording done — all cores, nice ${niceness})"
+  else
+    compute_cpu_split
+    if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
+      pin=(taskset -c "$GS_CAPTURE_CPUS")
+    fi
+    say "CHIP: rendering for '${CHIP_NAME}' (pinned ${GS_CAPTURE_CPUS:-none} + nice ${niceness})"
   fi
-  say "CHIP: rendering for '${CHIP_NAME}' (pinned ${GS_CAPTURE_CPUS:-none} + nice 19)"
   (
     cd "$MOTION_DIR" && \
-    "${pin[@]}" nice -n 19 \
+    "${pin[@]}" nice -n "$niceness" \
     node node_modules/.bin/remotion render \
         src/index.ts PlayerChip "$CHIP_MOV" \
         --codec=prores --prores-profile=4444 \
@@ -940,6 +1068,8 @@ ELAPSED_TICKS_TOTAL=0
 # the SAME index once after falling back to ximagesrc (see validation below).
 SEG_IDX=0
 VKCAP_FELL_BACK=0
+VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
+VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
 # Parse the segment table once (one node spawn) instead of 3x per
 # segment iteration. POV accountid = steamid64 - 76561197960265728;
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
@@ -959,19 +1089,54 @@ CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0
 # stalling the render thread so presents/s collapses (GPU+CPU idle during the dip);
 # once compiled they stay warm for the whole process. Steam's Fossilize precache
 # (10GiB on disk) does NOT cover these demo-POV pipelines, so the only cure is to
-# draw the footage once. We replay this segment's range ONCE â€” fast and uncaptured â€”
-# then seek back to SEG_START. Runs BEFORE STEP 2 deliberately: the warm's seek-back
-# is a backward seek, and cs2 stalls ~2s after a backward seek ([[seek stall]]); the
-# full STEP 2/3/4 lead-in that runs afterward absorbs that stall before capture.
+# draw the footage once. We replay each segment's range ONCE — fast and uncaptured —
+# and leave the playhead there. Runs BEFORE STEP 2 deliberately: STEP 3's seek back
+# to the pre-roll is then a backward seek, and cs2 stalls ~2s after a backward seek
+# ([[seek stall]]); the full STEP 2/3/4 lead-in absorbs that stall before capture.
 # (Running it after the POV lock instead put the backward seek immediately before
-# capture and wrecked the whole segment â€” do not move it.) Gated once per cs2 by a
-# marker (one cs2 serves the whole batch â†’ every later job/segment is then warm).
-# CLIP_WARMUP=0 disables; CLIP_WARMUP_RATE sets the speed (lower = more thorough).
+# capture and wrecked the whole segment — do not move it.) Every segment gets its
+# own pass: warming only the first left later segments compiling live — the same
+# kill in segment 2 held ~0.5s of frames (cs2 ~1000% CPU, GPU ~30%) on every run.
+# The marker lists the tick ranges already warmed for this cs2 (one cs2 serves the
+# whole batch); a range inside one of them is skipped. CLIP_WARMUP_ONCE=1 warms
+# only the first segment, as before.
+# On by default (CLIP_WARMUP=0 disables): with the warm-up off, the first segment of
+# a pod rendered at ~25fps for ~7s while cs2 compiled pipelines on every core (CPU
+# ~1000%, GPU idle) — the 2s pre-roll can't absorb that. After the replay it also
+# waits for cs2's CPU to settle (the compile queue draining), up to
+# CLIP_WARMUP_SETTLE_MS. CLIP_WARMUP_RATE sets the speed (lower = more thorough).
 WARM_MARKER="${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}"
+
+# Wait (bounded) for cs2's pipeline compiles to drain: while it compiles, cs2 burns
+# most cores; paused and idle it sits around 100-200%.
+warmup_wait_compile() {
+  local cap="${CLIP_WARMUP_SETTLE_MS:-12000}" cs2_pid hz a b pct=0 waited=0
+  # By process name: a full-cmdline match can hit a launcher/wrapper carrying cs2's path.
+  cs2_pid=$(pgrep -x cs2 | head -1)
+  [ -n "$cs2_pid" ] || return 0
+  hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  while [ "$waited" -lt "$cap" ]; do
+    a=$(awk '{print $14+$15}' "/proc/$cs2_pid/stat" 2>/dev/null) || return 0
+    sleep 0.5
+    b=$(awk '{print $14+$15}' "/proc/$cs2_pid/stat" 2>/dev/null) || return 0
+    waited=$((waited + 500))
+    pct=$(( (b - a) * 200 / hz ))   # % of one core over the 0.5s window
+    if [ "$pct" -lt "${CLIP_WARMUP_SETTLE_CPU:-400}" ]; then
+      say "WARM-UP: compiles settled (cs2 at ${pct}% CPU) after ${waited}ms"
+      return 0
+    fi
+  done
+  say "WARM-UP: cs2 still busy (${pct}% CPU) after ${cap}ms — continuing"
+}
 warm_pipelines_if_cold() {
-  local start="$1" dur_ms="$2"
+  local start="$1" dur_ms="$2" end
   [ "${CLIP_WARMUP:-1}" = "1" ] || return 0
-  [ -f "$WARM_MARKER" ] && return 0
+  [ "${CLIP_WARMUP_ONCE:-0}" = "1" ] && [ -s "$WARM_MARKER" ] && return 0
+  end=$(( start + dur_ms * ${CLIP_TICK_RATE:-64} / 1000 ))
+  if [ -f "$WARM_MARKER" ] && awk -v s="$start" -v e="$end" \
+       '$1 <= s && $2 >= e { found=1 } END { exit !found }' "$WARM_MARKER"; then
+    return 0
+  fi
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1
   local wait_ms=$(( dur_ms / rate + 2000 ))   # cover the range at $rate + compile-spike margin
@@ -981,19 +1146,23 @@ warm_pipelines_if_cold() {
   # capture window (start_chip_render) removed the seg0 stutter, so the viewmodel
   # was never the bottleneck â€” and locking here races the round-transition roster
   # (verify_spec_lock then burns ~8s retrying a stale slot for no gain).
-  say "WARM-UP: pre-compiling pipelines â€” replaying ${dur_ms}ms at ${rate}x (~${wait_ms}ms, uncaptured) [once per cs2]"
+  say "WARM-UP: pre-compiling pipelines — replaying ticks ${start}-${end} (${dur_ms}ms) at ${rate}x (~${wait_ms}ms, uncaptured)"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/seek   "{\"tick\": ${start}}"
+  # /demo/seek only queues the gototick, and from a pause it lands paused: a toggle
+  # sent before it lands gets undone, so the range never played (nothing warmed).
+  wait_seek_settled "WARM-UP seek" || true
   spec_post /demo/speed  "{\"rate\": ${rate}}"
   spec_post /demo/toggle '{}'                  # play through the range fast
   sleep "$(awk -v ms="$wait_ms" 'BEGIN{printf "%.2f", ms/1000}')"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/speed  '{"rate": 1}'
-  spec_post /demo/seek   "{\"tick\": ${start}}"
-  wait_seek_settled "WARM-UP seek-back" || true
+  warmup_wait_compile
+  # No seek back: STEP 3 seeks to the segment's pre-roll next anyway, and a seek to
+  # the tick cs2 is already parked on never shows a GSI change, so it can't settle.
   mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
-  : > "$WARM_MARKER"
-  say "WARM-UP: done â€” pipelines warmed for this cs2 process"
+  echo "$start $end" >> "$WARM_MARKER"
+  say "WARM-UP: done — ticks ${start}-${end} warmed"
 }
 
 # Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
@@ -1027,7 +1196,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_FILE="${SEG_DIR}/seg-$(printf '%03d' "$SEG_IDX").mp4"
   say "------- SEGMENT $((SEG_IDX + 1))/${SEG_COUNT}: ticks=${SEG_START}..${SEG_END} (${SEG_DURATION_MS}ms)"
 
-  # Expected pre-kill lead, so the "KILL seg$N ... at +Nms played" line below can
+  # Expected pre-kill lead, so the "KILL seg$N ... ms of demo time into the clip" line below can
   # be compared against what the API actually asked for instead of eyeballed.
   SEG_KILL_TICK="${SEG_KILLS[$SEG_IDX]:-}"
   SEG_LEAD_MS=""
@@ -1037,7 +1206,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     say "  expected pre-kill lead: ${SEG_LEAD_MS}ms (kill_tick=${SEG_KILL_TICK})"
   fi
 
-  # Warm the Vulkan pipelines once, BEFORE the seek/lead-in, so the warm's
+  # Warm this segment's Vulkan pipelines, BEFORE the seek/lead-in, so the warm's
   # backward seek is absorbed by STEP 2/3/4 before capture (see the function note).
   warm_pipelines_if_cold "$SEG_START" "$SEG_DURATION_MS"
 
@@ -1086,10 +1255,12 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # Never record at an inherited timescale — stale 2x/4x = double-speed clips.
   spec_post /demo/speed '{"rate": 1}'
   # The lead-in above played for 0.6s + the POV lock's polling, so this is a
-  # LARGE backward seek — the slowest kind. Everything below (capture spawn,
-  # play, wall-clock billing) assumes the playhead is at SEG_START, so wait for
-  # it rather than the old fixed 0.2s.
-  wait_seek_settled "STEP 4d re-seek" || true
+  # backward seek. Everything below (capture spawn, play, wall-clock billing)
+  # assumes the playhead is at SEG_PRE, so wait for it — but only briefly: it lands
+  # in 0.9-1.9s, and when the lead-in barely moved (cs2 stalls ~2s after STEP 3's
+  # backward seek, the case for every segment once the warm-up has run past it)
+  # GSI shows no change and it never reports settled, which burned the full 8s.
+  wait_seek_settled "STEP 4d re-seek" "${CLIP_RESEEK_SETTLE_TIMEOUT_MS:-3000}" || true
   sleep 0.2
 
   # Re-press slot before capture (re-seek reset POV); queued for play.
@@ -1144,6 +1315,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # GSI stops while paused, so this baseline is usually stale — that's fine: fresh
   # GSI only resumes once the demo rolls, which is exactly what we wait for.
   PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}" any) || PLAY_SIG_BEFORE=""
+  if [ "${CLIP_CAPTURE_FIXED_TIMESTEP:-0}" = "1" ]; then
+    say "STEP 5: fixed timestep on (host_framerate ${CLIP_OUTPUT_FPS:-60})"
+    set_fixed_timestep "${CLIP_OUTPUT_FPS:-60}"
+  fi
   now_ms PLAY_T0
   spec_post /demo/toggle '{}'
 
@@ -1159,11 +1334,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     log_spec_slots "after-play"
     wait_preroll "$SEG_PREROLL_MS" "${PLAY_SIG_BEFORE%%|*}" "$PLAY_T0" || true
     clip_capture_go
+    now_ms GATE_MS
   else
     clip_capture_go
+    now_ms GATE_MS
     repress_pov_after_play
     log_spec_slots "after-play"
   fi
+  # The game clock (phase countdown) at the gate, so the KILL line can report the real
+  # demo time into the clip, not wall time rescaled into ticks.
+  IFS='|' read -r _ GATE_PE _ GATE_AGE _ <<<"$(capture_fields_line "${SEG_POV_STEAMID:-}")"
 
   # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
   # forced to 1, so wall-time == demo-time once playing (we opened the capture
@@ -1197,8 +1377,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
   GSI_SIG_CHANGED=0
   GSI_SIG_POLLS=0
-  now_ms WALLCLOCK_START_MS
-  PREV_MS=$WALLCLOCK_START_MS
+  # Billing starts at the gate: recording began there, and the checks above (a cs2
+  # fatal probe can take seconds) were recorded but went unbilled, so the clip ran
+  # long and every "+Nt" below was measured from the wrong moment.
+  WALLCLOCK_START_MS=$GATE_MS
+  PREV_MS=$GATE_MS
   while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
@@ -1247,7 +1430,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # verify the kill lands ~lead into the clip. (Detection only â€” no behavior.)
     if [ -n "$POV_KILLS" ]; then
       if [ -n "$LAST_POV_KILLS" ] && [ "$POV_KILLS" -gt "$LAST_POV_KILLS" ]; then
-        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, expected ${SEG_LEAD_MS:-?}ms, clock=${PHASE_ENDS:-?})"
+        # Demo time since the gate, off the phase countdown (0.1s resolution; "?" if it
+        # reset in between, e.g. freezetime end or a bomb plant).
+        KILL_LEAD=$(awk -v g="${GATE_PE:-}" -v k="${PHASE_ENDS:-}" -v ga="${GATE_AGE:-0}" \
+          'BEGIN{ if (g == "" || k == "" || k > g) { print "?"; exit } printf "%d", (g - k) * 1000 - ga }')
+        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at ${KILL_LEAD}ms of demo time into the clip (expected ${SEG_LEAD_MS:-?}ms; ${PLAYED_MS}ms wall, clock=${PHASE_ENDS:-?})"
       fi
       LAST_POV_KILLS="$POV_KILLS"
     fi
@@ -1345,6 +1532,12 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
+  if [ "$FIXED_TIMESTEP_ON" = "1" ]; then
+    set_fixed_timestep 0
+    report_host_framerate
+    has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE" "${CLIP_CAPTURE_TIMING_FILE:-}"
+  fi
+  [ -n "${CLIP_CAPTURE_TIMING_FILE:-}" ] && rm -f "$CLIP_CAPTURE_TIMING_FILE"
 
   # Sanity check the RAW capture before any polish: capture sometimes
   # produces an mp4 with no decodable frames (cs2 mid-load, audio attach
@@ -1450,11 +1643,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     fi
     CONCAT_ENTRY[$SEG_IDX]="$SEG_FILE"
   elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
-    # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
-    # 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid argument").
-    # ximagesrc needs no dmabuf, so switch the whole render to it and redo this
-    # segment. One-shot (VKCAP_FELL_BACK): the failure is per-pod, never thrashes.
-    say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) â€” falling back to ximagesrc and retrying"
+    # Empty under vkcapture. Never armed = the present-hook delivered no frames (e.g.
+    # the GTX 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid
+    # argument") — a per-pod failure, so the rest of the render switches to ximagesrc.
+    # Armed = frames were flowing and this capture failed on its own (a wedged
+    # pipeline, a killed consumer): redo just this segment on ximagesrc and go back
+    # to vkcapture for the next one — at most twice, then stay on ximagesrc.
+    if [ "${CLIP_CAPTURE_ARMED:-0}" = "1" ] && [ "$VKCAP_ONE_OFF_FAILS" -lt 2 ]; then
+      VKCAP_ONE_OFF_FAILS=$((VKCAP_ONE_OFF_FAILS + 1))
+      VKCAP_RETRY_SEG=$SEG_IDX
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) after arming — redoing it on ximagesrc, vkcapture again from the next segment"
+    else
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc for the rest of the render"
+    fi
     CLIP_CAPTURE_METHOD=ximagesrc; export CLIP_CAPTURE_METHOD
     VKCAP_FELL_BACK=1
     rm -f "$SEG_FILE"
@@ -1462,6 +1663,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   else
     say "WARN segment $SEG_IDX is empty/short (${SEG_BYTES}B, ${SEG_REAL_DUR}s) â€” dropping from concat"
     rm -f "$SEG_FILE"
+  fi
+  if [ "$VKCAP_RETRY_SEG" = "$SEG_IDX" ]; then
+    CLIP_CAPTURE_METHOD=vkcapture; export CLIP_CAPTURE_METHOD
+    VKCAP_FELL_BACK=0
+    VKCAP_RETRY_SEG=""
   fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
   SEG_IDX=$((SEG_IDX + 1))
@@ -1471,7 +1677,7 @@ done
 # Chromium render never competes with cs2 during capture (the seg0-tail jitter).
 # No-op when already launched (non-fused path launched it before the loop) or when
 # there's no chip. It overlaps the light concat.txt prep below; reaped before STEP 9.
-start_chip_render
+start_chip_render after
 
 # Wait for the last background polish, then write concat.txt in segment
 # order. Entries were recorded per index during the loop; nothing reads

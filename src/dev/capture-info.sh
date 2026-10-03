@@ -19,7 +19,7 @@ CODEC="${1:-${LIVE_VIDEO_CODEC:-h264}}"
 OUT="${LIVE_OUTPUT_DIMS:-1920x1080}"
 W="${OUT%x*}"; H="${OUT#*x}"
 FPS="${FPS:-60}"
-GOP=$(( FPS * 2 ))
+GOP=$FPS
 KBPS="${VIDEO_KBPS:-12000}"
 
 say "Hardware auto-tune"

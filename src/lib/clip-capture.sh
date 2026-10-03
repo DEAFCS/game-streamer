@@ -20,6 +20,15 @@ start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   CLIP_CAPTURE_READY_FILE=""
   CLIP_CAPTURE_START_FILE=""
+  # Set to 1 by wait_clip_capture_ready once the consumer reports the layer is pacing
+  # and it stamps frames by count — only then may the caller put cs2 on a fixed
+  # timestep (host_framerate). Anything else (ximagesrc, an old layer or consumer)
+  # samples the wall clock, where a fixed timestep would change the playback speed.
+  CLIP_CAPTURE_FIXED_TIMESTEP=0
+  CLIP_CAPTURE_TIMING_FILE=""
+  # Set to 1 by wait_clip_capture_ready once the consumer is armed (frames flowing):
+  # tells a one-off failure apart from a pod that can't do vkcapture at all.
+  CLIP_CAPTURE_ARMED=0
   if [ "$method" = "vkcapture" ]; then
     if ! command -v vkcapture-consumer >/dev/null 2>&1; then
       warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed â€” using ximagesrc"
@@ -100,23 +109,17 @@ _start_clip_capture_vkcapture() {
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
 
-  # Zero-copy dmabuf import (VKCAP_ZEROCOPY, default ON): the consumer hands appsrc
-  # a DEVICE-LOCAL dmabuf and cudaupload imports it on the GPU â€” the CPU never
-  # copies a frame (vs. the host-map wc_copy + PCIe round-trip). Preflight gates it
-  # to where it can work: the encode chain must be CUDA (a CPU videoconvert can't
-  # consume memory:DMABuf) and this gst's cudaupload must advertise DMABuf import.
-  # Either miss => host-map copy path (correct, just costs the CPU copy).
-  local zc="${VKCAP_ZEROCOPY:-1}"
-  if [ "$zc" != "0" ]; then
-    if [[ "$convert" != *cudaupload* ]]; then
-      warn "zero-copy wanted but encode chain isn't CUDA (no cudaupload) â€” using host-map copy"
-      zc=0
-    elif ! _cudaupload_dmabuf_ok; then
-      warn "zero-copy wanted but this gst cudaupload lacks memory:DMABuf import â€” using host-map copy"
-      zc=0
-    else
-      zc=1
-    fi
+  # Zero-copy (CLIP_ZEROCOPY=1, off by default — measured no gain, see the docs): the layer exports the shared image as
+  # an OPAQUE_FD that the consumer imports into CUDA, and each frame is one GPU-to-GPU
+  # copy pushed as memory:CUDAMemory, which cudaupload passes straight through — no
+  # PCIe readback, no CPU copy. Needs the CUDA encode chain. The consumer falls back by
+  # itself: no CUDA => it drops the CUDA feature from the vkcaps filter (host-map path,
+  # cudaupload uploads as before); no import => it asks the layer for the host-mapped
+  # image and uploads each frame to CUDA itself.
+  local zc="${CLIP_ZEROCOPY:-0}"
+  if [ "$zc" = "1" ] && [[ "$convert" != *cudaupload* ]]; then
+    log "  clip capture: encode chain isn't CUDA (no cudaupload) — host-map copy, no zero-copy"
+    zc=0
   fi
 
   log "  clip capture: $out_file (vkcapture/present-hook -> ${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
@@ -146,15 +149,14 @@ _start_clip_capture_vkcapture() {
   local attempt
   for attempt in 1 2; do
     export VKCAP_ZEROCOPY="$zc"
-    # $vfeat tags the appsrc caps with memory:DMABuf so the feature survives the
-    # framerate filter into cudaupload. appsrc (name=vksrc) is filled by the
-    # consumer from cs2's swapchain; everything downstream matches the ximagesrc
-    # path. qtmux faststart=true keeps moov first. videorate + framerate caps ->
-    # exact CFR (appsrc frames are do-timestamp stamped on the live clock, so timing
-    # can wobble; videorate dups/drops to lock $fps).
+    # $vfeat tags the source caps (the vkcaps filter, which the consumer can rewrite)
+    # with memory:CUDAMemory so zero-copy frames reach cudaupload as CUDA memory.
+    # appsrc (name=vksrc) is filled by the consumer from cs2's swapchain; everything
+    # downstream matches the ximagesrc path. qtmux faststart=true keeps moov first.
+    # videorate + framerate caps -> exact CFR (videorate dups/drops to lock $fps).
     local vfeat=""
-    [ "$zc" = "1" ] && { vfeat="(memory:DMABuf)"; log "  clip capture: zero-copy dmabuf import ON (no CPU frame copy)"; }
-    local vsrc="appsrc name=vksrc ! queue ! videorate ! video/x-raw${vfeat},framerate=$fps/1"
+    [ "$zc" = "1" ] && { vfeat="(memory:CUDAMemory)"; log "  clip capture: zero-copy requested (CUDA import, no CPU frame copy)"; }
+    local vsrc="appsrc name=vksrc ! queue ! videorate ! capsfilter name=vkcaps caps=\"video/x-raw${vfeat},framerate=$fps/1\""
     local pipeline
     if [ "$audio" = "1" ]; then
       # Deep pulsesrc buffer (2s) + a non-leaky 2s audio queue: file output has no
@@ -167,7 +169,31 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     else
       pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! qtmux faststart=true ! filesink location=$out_file"
     fi
-    spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
+    # Fixed timestep (CLIP_FIXED_TIMESTEP=1, off by default): cs2 steps exactly 1/fps of
+    # game time per frame (host_framerate, set by the renderer), the layer holds its
+    # presents to exactly $fps, and the consumer stamps present N at N/fps — so every
+    # output frame is one game step, with no wall-clock dup/drop from videorate. The
+    # consumer engages it only when the layer confirms the pacing, and reports that
+    # in the ready file; it writes the video-vs-wall span to the timing file at exit
+    # for the audio retime. Scoped to this spawn so the live consumer never inherits it.
+    # Grid pacing (CLIP_PACE, on by default; 0 = off) is the same pacing without touching the
+    # game clock: a late frame skips the grid slots it missed (the poke says how many)
+    # instead of catching up, so the frame count always matches wall time — it fixes
+    # cs2's fps_max overshoot, and a render spike shows as an honest repeat.
+    local fixed=0 pace=0 skip=0
+    if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
+      fixed=1; pace=$fps
+    elif [ "${CLIP_PACE:-1}" = "1" ]; then
+      fixed=1; pace=$fps; skip=1
+    fi
+    CLIP_CAPTURE_TIMING_FILE="${out_file}.timing"
+    rm -f "$CLIP_CAPTURE_TIMING_FILE"
+    # Frame handoff (CLIP_FRAME_HANDOFF, on by default; 0 = off): the layer pokes
+    # only once the frame's GPU copy has landed and holds the next copy until the
+    # consumer has read it — otherwise a read can get the previous frame or a torn one.
+    VKCAP_FRAME_PTS=$fixed VKCAP_PACE_FPS=$pace VKCAP_PACE_SKIP=$skip VKCAP_TIMING_FILE="$CLIP_CAPTURE_TIMING_FILE" \
+    VKCAP_FRAME_ACK="${CLIP_FRAME_HANDOFF:-1}" \
+      spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     local pid=$SPAWNED_PID
     sleep 0.5
     if kill -0 "$pid" 2>/dev/null; then
@@ -286,6 +312,13 @@ wait_clip_capture_ready() {
   while [ "$waited" -lt "$timeout_ms" ]; do
     if [ -f "$marker" ]; then
       log "  clip capture armed after ${waited}ms"
+      CLIP_CAPTURE_ARMED=1
+      # host_framerate only for the fixed timestep; grid pacing leaves the game clock alone.
+      if grep -q '^paced=1' "$marker" 2>/dev/null; then
+        [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] && CLIP_CAPTURE_FIXED_TIMESTEP=1
+      elif [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-1}" = "1" ]; then
+        warn "  pacing unavailable: layer didn't confirm it (image predates it?) — recording on the wall clock"
+      fi
       return 0
     fi
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then

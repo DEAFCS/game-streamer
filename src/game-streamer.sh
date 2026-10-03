@@ -108,7 +108,7 @@ run_demo_flow() {
       if [ -s "$DEMO_FILE_BG" ] && [ ! -f "$DEMO_FILE_BG.failed" ]; then
         report_status status=demo_ready event=1
       fi
-    ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
+    ) > >(awk "${GS_AWK_LINES[@]}" '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/demo-download.pid
     fi
   fi
@@ -140,7 +140,7 @@ run_demo_flow() {
       if ! download_workshop_map "$WORKSHOP_ID"; then
         touch "$WORKSHOP_FAILED"
       fi
-    ) > >(awk '{print "[workshop-download] " $0; fflush()}' >&2) 2>&1 &
+    ) > >(awk "${GS_AWK_LINES[@]}" '{print "[workshop-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/workshop-download.pid
   fi
   "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?

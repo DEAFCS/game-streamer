@@ -170,6 +170,13 @@ process_batch_jobs() {
   # the UI shows the reason) and exits so the Job is reaped and the GPU
   # node frees. DEMO_READY_TIMEOUT is a backstop for any other
   # never-ready cause.
+  # Resolve the encoder/scaler probes meanwhile (they land in the per-pod probe
+  # cache), so the first segment doesn't spend ~11s starting CUDA after the demo
+  # is ready. Backgrounded: any miss just means the segment probes itself.
+  ( _ensure_nvenc_pick h264
+    case "${CLIP_VIDEO_CODEC:-h264}" in h265|hevc) _ensure_nvenc_pick h265 ;; esac
+    _cuda_scale_available ) >/dev/null &
+  disown $! 2>/dev/null || true
   say "waiting for demo-ready (GSI + demoui_hidden)"
   local console_log="$CS2_DIR/game/csgo/console.log"
   local demo_ready_timeout="${DEMO_READY_TIMEOUT:-300}"

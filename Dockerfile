@@ -102,7 +102,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends cuda-nvrtc-12-6
 # vkcapture-consumer (compiled below) is the socket consumer. Pinned to a release
 # tag for reproducible builds. Requires nvidia-drm.modeset=1 on the host.
 # present-eventfd.patch adds a per-present eventfd poke (see src/vkcapture/) so the
-# consumer can frame-lock to cs2's presents; copied in before the clone so `git
+# consumer can frame-lock to cs2's presents, plus, on request, exact present pacing
+# (clip fixed timestep) and a frame handoff (poke after the GPU copy lands, hold the
+# next copy until the consumer has read it); copied in before the clone so `git
 # apply` can patch the freshly cloned tree (src/ proper isn't COPY'd until later).
 COPY src/vkcapture/present-eventfd.patch /tmp/present-eventfd.patch
 RUN set -eux; \
@@ -222,13 +224,16 @@ RUN chmod +x /opt/game-streamer/src/*.sh \
 
 # Compile the obs-vkcapture socket consumer (binds the layer's socket, pushes cs2's
 # frames into a GStreamer NVENC pipeline). Build-only headers — the gstreamer/glib
-# runtime libs are already in the image — so purge them after the build.
+# runtime libs are already in the image — so purge them after the build. gst-cuda
+# (zero-copy) comes with plugins-bad; its headers include cuda.h, which the -base
+# CUDA image lacks, so they build against GStreamer's own stub (src/vkcapture/cuda-stub).
 RUN set -eux; \
-      build_deps="gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev"; \
+      build_deps="gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev"; \
       apt-get update && apt-get install -y --no-install-recommends $build_deps \
-      && gcc -O2 -Wall -Wextra -o /usr/local/bin/vkcapture-consumer \
+      && gcc -O2 -Wall -Wextra -I/opt/game-streamer/src/vkcapture/cuda-stub \
+           -o /usr/local/bin/vkcapture-consumer \
            /opt/game-streamer/src/vkcapture/vkcapture-consumer.c \
-           $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0) \
+           $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-cuda-1.0) -ldl \
       && test -x /usr/local/bin/vkcapture-consumer \
       && apt-get purge -y $build_deps && apt-get autoremove -y \
       && rm -rf /var/lib/apt/lists/*

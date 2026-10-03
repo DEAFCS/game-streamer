@@ -6,12 +6,14 @@ import { DEMOUI_BAR_THRESHOLD, demouiBarScore, hideDemoui } from "./demoui.mjs";
 
 // A fake cs2: the bar opens on its own at `opensAt`, and a toggle only takes effect once
 // the panel is interactable (`interactableAt`), like the real one. Time is simulated.
-function fakeCs2({ opensAt = 0, interactableAt = 0, reopensAt = null, readable = true } = {}) {
+function fakeCs2({ opensAt = 0, interactableAt = 0, reopensAt = null, readable = true, withdrawn = false } = {}) {
   let t = 0;
   let open = false;
   let opened = false;
   let reopened = false;
+  let mapped = !withdrawn;
   const toggles = [];
+  const reveals = [];
   const settle = () => {
     if (!opened && t >= opensAt) { open = true; opened = true; }
     if (reopensAt !== null && !reopened && t >= reopensAt) { open = true; reopened = true; }
@@ -23,9 +25,12 @@ function fakeCs2({ opensAt = 0, interactableAt = 0, reopensAt = null, readable =
     check: async () => {
       settle();
       if (!readable) return null;
+      if (!mapped) return { visible: false, score: 0.16, mean: 7 };   // the empty root window
       const score = open ? 0.99 : 0.2;
       return { visible: score >= DEMOUI_BAR_THRESHOLD, score, mean: 90 };
     },
+    reveal: async () => { reveals.push(t); mapped = true; return true; },
+    reveals,
     toggle: async () => {
       toggles.push(t);
       if (t >= interactableAt) open = !open;
@@ -56,6 +61,21 @@ test("closes the bar again if it reopens during confirmation", async () => {
 test("never toggles a bar that never shows", async () => {
   const cs2 = fakeCs2({ opensAt: Infinity });
   assert.equal(await hideDemoui(cs2), "never-showed");
+  assert.equal(cs2.toggles.length, 0);
+});
+
+test("maps a withdrawn cs2 window back instead of waiting on a black screen", async () => {
+  const cs2 = fakeCs2({ opensAt: 0, withdrawn: true });
+  assert.equal(await hideDemoui(cs2), "hidden");
+  assert.equal(cs2.reveals.length, 1);
+  assert.equal(cs2.toggles.length, 1);
+  assert.ok(cs2.now() < 10_000);
+});
+
+test("gives up on a screen that stays black", async () => {
+  const cs2 = fakeCs2({ opensAt: 0, withdrawn: true });
+  const stuck = { ...cs2, reveal: async () => false };
+  assert.equal(await hideDemoui(stuck), "never-showed");
   assert.equal(cs2.toggles.length, 0);
 });
 

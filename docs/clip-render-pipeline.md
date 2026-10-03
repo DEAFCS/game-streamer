@@ -59,7 +59,7 @@ upload — which is what lets job N+1 start seeking while job N is still uploadi
 | --- | --- | --- |
 | Wait for the demo to be render-ready before job 1 | `DEMO_READY_TIMEOUT` (300s) | Seeking an unloaded demo lands on tick 0 and captures black. Requires GSI to have fired **and** the demo UI panel to be hidden. |
 | At most 2 upload tails in flight | `CLIP_BATCH_MAX_TAILS` (2) | A slow API would otherwise stack every finished clip on local disk at once. The oldest is reaped before the next job starts. |
-| Warm the Vulkan pipelines once per CS2 process | `CLIP_WARMUP_RATE` (4x) | Replays the first segment's range at 4x with nothing recording, so pipeline compilation doesn't land inside a real capture. Guarded by a marker file, dropped when a fresh CS2 starts. |
+| Warm each segment's Vulkan pipelines before recording it | `CLIP_WARMUP` (on), `CLIP_WARMUP_RATE` (4x), `CLIP_WARMUP_SETTLE_MS` (12s), `CLIP_WARMUP_ONCE` (off) | Before each segment, replays its range at 4x with nothing recording, then waits for cs2's CPU to settle (the compile queue draining), so pipeline compilation doesn't land inside a real capture. Without it the first segment rendered at ~25fps for ~7s with cs2 at ~1000% CPU, and with only the first segment warmed a later kill still held ~0.5s of frames. Ranges already warmed for this CS2 are skipped (marker file, dropped when a fresh CS2 starts). `CLIP_WARMUP_ONCE=1` warms only the first segment. |
 | An engine fatal kills the rest of the batch | `CS2_FATAL_SENTINEL` | Once CS2 dies, remaining jobs are failed fast with a reason instead of capturing frozen frames. |
 
 ---
@@ -74,7 +74,7 @@ These are the `STEP` labels as they print in the render log, in order.
 | `STEP 1b` | `spec_autodirector 0` — otherwise CS2's director fights the POV lock and the camera flickers at segment starts. |
 | `STEP 1a` | Stop the live capture (live pods only — the GPU encoder can't serve stream and clip at once). |
 | prep | Decide branding; **defer** the Remotion player-chip render. Running it during a capture caused a visible stutter, so it's kept outside the capture window. |
-| warm-up | Replay the first range at 4x, uncaptured. Once per CS2 process. |
+| warm-up | Before each segment, replay its range at 4x, uncaptured, then wait for the compiles to settle. Ranges this CS2 already warmed are skipped. |
 | `STEP 2`–`STEP 8` | **Segment loop**, once per kill. Each pass writes one `seg-NNN.mp4`. See below. |
 | polish | Burn the chip overlay into each segment, backgrounded so it overlaps the next segment's capture. Reaped before assembly. |
 | `STEP 9` | Concat segments + append the outro. Tries a stream copy first and verifies the output duration; falls back to a filter-graph re-encode if the copy is refused or the duration drifts >2s. Direct cuts, no fades — crossfades compounded with CS2's seek-load frames into ~1s of dead air per join. |
@@ -181,6 +181,84 @@ unpause — so the consumer separates *armed* from *recording*:
 Without `VKCAP_START_FILE` the consumer arms and records immediately — that's the path the
 live stream uses, and it's unchanged.
 
+### The fixed timestep
+
+cs2's own `fps_max` limiter overshoots (~63-64 presents/s at `fps_max 60`), so a
+wall-clock capture squeezed 64 renders into 60 slots — `videorate` dropped 3-4 frames a
+second — and any render spike froze frames. While a segment records (`CLIP_FIXED_TIMESTEP=1`,
+**off by default**: in production cs2 fell to ~25fps under it during a fight, so the
+game ran at ~0.45x; frame stamps are now re-anchored rather than trail the clock by
+more than 250ms, which had backed the muxer's audio queue up into an EOS deadlock):
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Exact pacing | `present-eventfd.patch` | The layer holds each present to an absolute 1/fps grid, catching up after a stall of up to 250ms. Only when the consumer asks (`pace_fps`), and it echoes the rate back in the texture message. |
+| Frame-count PTS | `vkcapture-consumer.c` | Present N is stamped `base + N/fps` instead of its arrival time. Engaged only when the layer confirmed pacing; reported as `paced=1` in the ready file. |
+| Fixed game step | `inline-clip-render.sh` | `host_framerate <fps>` from STEP 5 to STEP 8, only on a `paced=1` capture, so each frame is exactly one game step. The first segment logs cs2's console echo (`host_framerate console:`). |
+| Audio retime | `inline-clip-render.sh` | The consumer writes the video (game) and wall spans to `<seg>.timing`; a drift over 35ms stretches the audio by wall/video (`atempo`). |
+
+`fps_max` for clip batches is 2x the clip rate: headroom for the catch-up, the layer does
+the exact pacing. An image without the patched layer degrades to the wall-clock capture.
+
+### Grid pacing
+
+`CLIP_PACE` (on by default; `CLIP_PACE=0` turns it off) keeps the exact pacing and frame-count PTS but leaves the
+game clock alone (no `host_framerate`). A frame that misses its 1/fps slot presents in
+the slot it lands in and the missed slots are skipped, keeping the grid's phase, instead
+of the next frames catching up; the layer's poke carries how many slots the frame
+advanced, so the consumer's frame count always equals wall time. That fixes the
+`fps_max` overshoot drops, a render spike shows as an honest repeated frame, and the
+stamps can't drift behind the audio. The consumer's `DEBUG` line reports slots/s, frames,
+skipped slots and how long each frame took to read.
+
+Live and replay streams use the same pacing and the frame handoff on their cs2+HUD
+composite capture (`LIVE_PACE`, on by default). The frame handoff is opt-in there
+(`LIVE_FRAME_HANDOFF=1`): on a replay stream it skipped 5-20 frames a second during
+rounds, while the same demo recorded as clips skipped none.
+
+### Zero-copy
+
+`CLIP_ZEROCOPY=1` (off by default). Measured on a node against the host-map copy with the frame handoff on: it engaged cleanly but capture CPU didn't drop (34% → 38%), GPU use rose (49% → 60%) and frame reads went from 1.4ms to ~5ms (the synchronous CUDA copy), so it stays opt-in. `cudaupload` has never taken DMABuf input on any
+GStreamer, so the consumer imports the image itself: the layer exports the shared image
+as an `OPAQUE_FD` (it reports the allocation size and whether the export worked in the
+texture message), the consumer imports it with CUDA's external-memory API (resolved from
+libcuda at runtime; gst-cuda's headers build against GStreamer's stub `cuda.h`), and each
+frame is one `CuMemcpy2DAsync` + sync into a pooled CUDA buffer pushed as
+`memory:CUDAMemory` on our CUDA context, which `cudaupload` passes through. The copy is
+synchronous, so the frame handoff still acks after the read. Fallbacks: no CUDA => the
+consumer drops the CUDA feature from the `vkcaps` filter (host-map path as before); the
+export or import fails => it asks the layer for the host-mapped image and uploads each
+frame to CUDA itself; the consumer dies on spawn => the shell retries without zero-copy.
+
+### The frame handoff
+
+The layer copies each frame into ONE shared image that the consumer reads on the CPU.
+Poking the consumer right after the copy was *submitted* let it read before the copy
+*landed* — the previous frame, or a torn one, depending on GPU timing. With
+`CLIP_FRAME_HANDOFF` (on by default; `0` turns it off):
+
+1. The layer hands the copy's fence to a helper thread; the present thread doesn't wait.
+2. The helper waits for the fence, pokes, then waits (≤20ms) for the consumer to report
+   the read done on an ack socket (a running total, so a late ack can't count twice).
+3. The next present drains that before submitting its copy, so the image never changes
+   under a read.
+
+The consumer logs `frame handoff ENGAGED`, or a WARN when the layer predates it. It covers
+zero-copy too: the CUDA copy out of the shared image is synchronous, so the ack still
+follows the read.
+
+### Encode quality
+
+Segments are captured with NVENC at `CLIP_VIDEO_KBPS` (24 Mbps) CBR, p5/high-quality,
+with spatial and temporal AQ when the element has them. That file is an intermediate:
+STEP 9 (and the chip polish) re-encode it with `h264_nvenc` p6/hq, two-pass (quarter
+res), spatial+temporal AQ, lookahead and B-frames as references, at `CLIP_FINAL_BITRATE`
+(9 Mbps) VBR with peaks to `CLIP_FINAL_MAXRATE` (14 Mbps) — about the size the old
+libx264 veryfast/crf 22 encode made, and roughly twice as fast. Constant quality 19
+tripled the file size without a visible difference. NVENC is checked with a tiny test
+encode first; the old libx264 encode is the fallback, and `CLIP_FINAL_ENCODER=x264`
+forces it.
+
 ---
 
 ## 4. Every wait, and what happens when it expires
@@ -190,7 +268,7 @@ Nothing blocks forever. The standing rule is that a late clip beats no clip.
 | Gate | Signal | Ceiling | On expiry |
 | --- | --- | --- | --- |
 | Demo ready | GSI fired **and** `demoui_hidden` | `DEMO_READY_TIMEOUT` 300s | Fails the whole batch with a reason so the node frees instead of hanging. |
-| Seek settled | `/demo/seek-state` reports the gototick finished (needs a post-landing GSI frame — the 1s GSI heartbeat provides one while paused) | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
+| Seek settled | `/demo/seek-state` reports the gototick finished (needs a post-landing GSI frame that shows a change — the 1s GSI heartbeat provides one while paused; a seek to the tick cs2 is already on never settles) | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s (the STEP 4d re-seek: `CLIP_RESEEK_SETTLE_TIMEOUT_MS` 3s) | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
 | POV locked | GSI `spectated_steam_id` matches the target | 2 tries | Re-presses the slot once, then proceeds on whatever POV CS2 has. |
 | Capture armed | Consumer's ready file appears | `CLIP_CAPTURE_READY_TIMEOUT_MS` 8s | Starts playback anyway — the opening frames won't be in the file. |
 | Playback moving | Fresh GSI whose `phase_ends_in`/`world_motion` differ from the pre-unpause values (GSI stops while paused, so fresh GSI itself means rolling) | `CLIP_PLAY_CONFIRM_TIMEOUT_MS` 2.5s | Continues to the pre-roll regardless. |

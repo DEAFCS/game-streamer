@@ -44,9 +44,16 @@ start_status_reporter
 # capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
 # (drops, no dups) â€” headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
-# Clip batches launch at the clip rate instead: cs2 ignores a later fps_max.
+# Clip batches are set at launch (cs2 ignores a later fps_max). With the fixed timestep
+# (CLIP_FIXED_TIMESTEP=1, off by default) the capture layer paces cs2 to exactly the clip rate
+# while recording, so the cap is only headroom: 2x the clip rate. cs2's own limiter
+# overshoots (~63-64 presents/s at fps_max 60), so it can't be the 60Hz clock itself.
+# Same for grid pacing (CLIP_PACE, on by default). Without either, launch at the clip rate.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -z "${CS2_FPS_MAX:-}" ]; then
   CS2_FPS_MAX=$(printf '%s' "${CLIP_BATCH_JOBS:-}" | node "$LIB_DIR/clip-helpers.mjs" jobs-fps)
+  if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-1}" = "1" ]; then
+    CS2_FPS_MAX=$(( CS2_FPS_MAX * 2 ))   # the layer paces; the cap is only headroom
+  fi
 fi
 : "${CS2_FPS_MAX:=120}"
 export CS2_FPS_MAX
@@ -63,10 +70,11 @@ log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT}"
 # Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
 # the detected GPU class (explicit env still wins; cs2 threads left to the engine).
 cs2_autotune
-# VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
-# 1.78x 1080p) so encoder quality stays roughly constant across modes.
+# VIDEO_KBPS follows the size that is actually encoded, LIVE_OUTPUT_DIMS
+# (1080p unless set), not CS2_DISPLAY_RES: a 1440p render is scaled down to
+# the output size before encoding, so it needs no more bitrate than 1080p.
 # An explicit override (env or pod spec) still wins via `:=` semantics.
-case "$CS2_DISPLAY_RES" in
+case "${LIVE_OUTPUT_DIMS:-1920x1080}" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
@@ -323,6 +331,8 @@ CS2_CONSOLE_OFFSET=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
 CS2_CONSOLE_OFFSET="${CS2_CONSOLE_OFFSET//[!0-9]/}"
 do_applaunch
 wait_for_cs2_process do_applaunch
+apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) now
+( shader_log_report "this launch"; shader_cache_breakdown ) &   # diagnostics; du of ~20GB, off the launch path
 
 minimize_steam_windows
 

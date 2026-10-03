@@ -3,6 +3,7 @@ import process from "node:process";
 
 import { DISPLAY, LOG_DIR } from "../env.mjs";
 import { run } from "../util/run.mjs";
+import { revealCs2 } from "./input.mjs";
 
 // cs2's demo bar (`demoui`) can only be toggled — no explicit hide and no way to
 // ask whether it's open — so we look at the screen instead of guessing a delay.
@@ -75,6 +76,12 @@ const CONFIRM_CHECKS = 3;
 const MAX_TOGGLES = 4;
 // Fallback when the screen can't be read: the old fixed delay after the first GSI event.
 const BLIND_TOGGLE_MS = 3_000;
+// A grab this dark isn't cs2: its -noborder window withdraws itself when it loses
+// focus and nothing maps it back until a key is sent, so the grab shows the empty
+// root window (a pod sat 30s at brightness 7 waiting for a bar it couldn't see).
+const BLACK_MEAN = 12;
+// Re-map at most this often while the screen stays black.
+const REVEAL_EVERY_MS = 3_000;
 
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -87,9 +94,11 @@ export async function hideDemoui({
   sleep = realSleep,
   now = Date.now,
   log = logDemoui,
+  reveal = revealCs2,
 }) {
   const start = now();
   let seen = false;
+  let lastReveal = -Infinity;
   let toggles = 0;
   let closedChecks = 0;
   let lowest = Infinity;
@@ -102,6 +111,20 @@ export async function hideDemoui({
       await sleep(Math.max(0, BLIND_TOGGLE_MS - (now() - start)));
       await toggle();
       return "blind";
+    }
+    if (bar.mean < BLACK_MEAN) {
+      // Not cs2 on screen: bring its window back rather than judge the bar off black.
+      if (now() - lastReveal >= REVEAL_EVERY_MS) {
+        lastReveal = now();
+        log(`screen is black (brightness ${bar.mean.toFixed(0)}) — mapping cs2's window`);
+        await reveal();
+      }
+      if (now() - start >= NEVER_SEEN_MS) {
+        log(`screen stayed black for ${NEVER_SEEN_MS}ms — nothing to hide`);
+        return "never-showed";
+      }
+      await sleep(CHECK_MS);
+      continue;
     }
     lowest = Math.min(lowest, bar.score);
     highest = Math.max(highest, bar.score);

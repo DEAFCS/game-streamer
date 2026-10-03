@@ -31,8 +31,8 @@ fi
 # reads this, so it's safe to export globally.
 : "${FOSSILIZE_DISABLE_RATE_LIMITER:=1}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
-# mediamtx HTTP control API â€” start_capture polls to verify a publish
-# actually landed (gst-launch loops happily on a failing srt sink).
+# mediamtx HTTP control API — start_capture times connects to it to size the
+# SRT latency (see srt_latency_for_rtt in stream.sh).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
 # LOG_DIR (defaulted above) is a misnomer â€” k8s captures stdout/stderr;
@@ -113,6 +113,11 @@ cs2_mark_fatal() {
   printf '%s\n' "${1:-cs2 GetClassBaseline fatal}" > "$CS2_FATAL_SENTINEL" 2>/dev/null || true
 }
 
+# mawk (Ubuntu's awk) block-buffers its input from a pipe, so a daemon's lines only
+# surfaced in bursts (often all at exit, every line carrying the same timestamp).
+# -W interactive makes it read line by line; gawk doesn't need or know it.
+if awk -W version 2>&1 | grep -q mawk; then GS_AWK_LINES=(-W interactive); else GS_AWK_LINES=(); fi
+
 # Stdout+stderr of the daemon stream to this process's stderr with a
 # "[<tag>] " prefix per line â€” k8s container logs become self-describing.
 # nohup detaches so HUP doesn't kill it when launcher scripts exit;
@@ -120,25 +125,69 @@ cs2_mark_fatal() {
 spawn_logged() {
   local tag="$1"; shift
   nohup "$@" \
-    > >(awk -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
+    > >(awk "${GS_AWK_LINES[@]}" -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
     2>&1 &
   SPAWNED_PID=$!
 }
 
+# GStreamer element probes are slow — each gst-inspect / test pipeline loads the
+# nvcodec plugin and initialises CUDA (~1-2s) — and most callers run inside $(...)
+# subshells, where an exported "per-process" cache dies with the subshell: clip
+# capture re-probed the encoder and scaler on every segment (~15s). The answers
+# can't change for the life of the pod, so they're cached in a file.
+GS_PROBE_CACHE="${GS_PROBE_CACHE:-/tmp/game-streamer/gst-probes.env}"
+
+# Load <var> from the probe cache unless it's already set. 0 if it's set now.
+_probe_cache_load() {
+  local var="$1" line
+  [ -n "${!var:-}" ] && return 0
+  line=$(grep -m1 "^${var}=" "$GS_PROBE_CACHE" 2>/dev/null) || return 1
+  printf -v "$var" '%s' "${line#*=}"
+  export "${var?}"
+  [ -n "${!var}" ]
+}
+
+# Append <var>'s value to the probe cache (the first entry wins on load).
+_probe_cache_store() {
+  local var="$1"
+  [ -n "${!var:-}" ] || return 0
+  mkdir -p "$(dirname "$GS_PROBE_CACHE")" 2>/dev/null || return 0
+  printf '%s=%s\n' "$var" "${!var}" >> "$GS_PROBE_CACHE" 2>/dev/null || true
+}
+
+# Adaptive-quantization props for a CUDA NVENC element, when it has them: spatial AQ
+# moves bits into flat/dark areas and fast detail (smoke, flashes, sky) that plain CBR
+# leaves blocky; clips also get temporal AQ. Probed with gst-inspect once per pod (a
+# property the element lacks would kill the pipeline at parse time).
+# Usage: _nvenc_aq_props <element> <live|clip>
+_nvenc_aq_props() {
+  local el="$1" mode="$2" var="GS_AQ_${1//[!A-Za-z0-9]/_}" props=""
+  if ! _probe_cache_load "$var"; then
+    local spec
+    spec=$(gst-inspect-1.0 "$el" 2>/dev/null)
+    local found=""
+    grep -q '^ *spatial-aq ' <<<"$spec" && found+="s"
+    grep -q '^ *temporal-aq ' <<<"$spec" && found+="t"
+    printf -v "$var" '%s' "${found:-none}"
+    export "${var?}"
+    [ -n "$spec" ] && _probe_cache_store "$var"
+  fi
+  case "${!var}" in *s*) props+=" spatial-aq=true" ;; esac
+  [ "$mode" = clip ] && case "${!var}" in *t*) props+=" temporal-aq=true" ;; esac
+  printf '%s' "$props"
+}
+
 # Pick an H.264 encoder fragment. Tries nvcudah264enc, then nvh264enc
 # with a probed preset (driver 550+ dropped legacy preset GUIDs so
-# strict validation rejects them), then x264enc. Cached per-process in
-# GS_NVENC_PICK; override with GS_NVENC_ELEMENT.
+# strict validation rejects them), then x264enc. Cached in GS_NVENC_PICK
+# and the probe cache; override with GS_NVENC_ELEMENT.
 # Usage: pick_h264_pipeline <gop> <kbps> [live|clip]
 pick_h264_pipeline() {
   local gop="${1:?gop required}"
   local kbps="${2:?kbps required}"
   local mode="${3:-live}"
 
-  if [ -z "${GS_NVENC_PICK:-}" ]; then
-    GS_NVENC_PICK=$(_resolve_h264_method) || return 1
-    export GS_NVENC_PICK
-  fi
+  _ensure_nvenc_pick h264
 
   case "$GS_NVENC_PICK" in
     nvcudah264enc)
@@ -151,8 +200,8 @@ pick_h264_pipeline() {
       esac
       # No leading `cudaupload` â€” pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
-      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
-        "$preset" "$tune" "$gop" "$kbps"
+      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s%s' \
+        "$preset" "$tune" "$gop" "$kbps" "$(_nvenc_aq_props nvcudah264enc "$mode")"
       ;;
     nvh264enc:*)
       local preset="${GS_NVENC_PICK#nvh264enc:}"
@@ -243,10 +292,7 @@ pick_h265_pipeline() {
   local kbps="${2:?kbps required}"
   local mode="${3:-live}"
 
-  if [ -z "${GS_NVENC_PICK_H265:-}" ]; then
-    GS_NVENC_PICK_H265=$(_resolve_h265_method) || true
-    export GS_NVENC_PICK_H265
-  fi
+  _ensure_nvenc_pick h265
 
   local h265_kbps=$((kbps * 7 / 10))
 
@@ -259,8 +305,8 @@ pick_h265_pipeline() {
       esac
       # No leading `cudaupload` â€” pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
-      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
-        "$preset" "$tune" "$gop" "$h265_kbps"
+      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s%s' \
+        "$preset" "$tune" "$gop" "$h265_kbps" "$(_nvenc_aq_props nvcudah265enc "$mode")"
       ;;
     nvh265enc:*)
       local preset="${GS_NVENC_PICK_H265#nvh265enc:}"
@@ -279,10 +325,7 @@ pick_h265_pipeline() {
 
 # 0 if NVENC HEVC is available on this pod. Caches into GS_NVENC_PICK_H265.
 h265_available() {
-  if [ -z "${GS_NVENC_PICK_H265:-}" ]; then
-    GS_NVENC_PICK_H265=$(_resolve_h265_method) || true
-    export GS_NVENC_PICK_H265
-  fi
+  _ensure_nvenc_pick h265
   case "${GS_NVENC_PICK_H265:-none}" in
     none|"") return 1 ;;
     *)       return 0 ;;
@@ -353,18 +396,25 @@ _probe_nvh265enc_preset() {
 # Populate the NVENC pick cache for $codec if cold. pick_h26{4,5}_pipeline runs
 # in a `$(...)` subshell so its cached export never reaches the parent;
 # re-resolve here (same probe, stderr muted) so the scaler's CUDA-vs-CPU choice
-# matches the chosen encoder â€” else the scaler picks CPU for a CUDA encoder.
+# matches the chosen encoder — else the scaler picks CPU for a CUDA encoder.
+# Resolve once per pod: the env, then the probe cache, then a real probe. Only GPU
+# picks are cached — x264enc / none can be a transient NVENC failure worth retrying.
+# Usage: _ensure_nvenc_pick <h264|h265> [quiet]  (quiet mutes the probe's log line)
 _ensure_nvenc_pick() {
+  local var=GS_NVENC_PICK resolve=_resolve_h264_method pick
   case "${1:-h264}" in
-    h265|hevc)
-      [ -n "${GS_NVENC_PICK_H265:-}" ] && return 0
-      GS_NVENC_PICK_H265=$(_resolve_h265_method 2>/dev/null) || true
-      export GS_NVENC_PICK_H265 ;;
-    *)
-      [ -n "${GS_NVENC_PICK:-}" ] && return 0
-      GS_NVENC_PICK=$(_resolve_h264_method 2>/dev/null) || true
-      export GS_NVENC_PICK ;;
+    h265|hevc) var=GS_NVENC_PICK_H265 resolve=_resolve_h265_method ;;
   esac
+  _probe_cache_load "$var" && return 0
+  if [ "${2:-}" = quiet ]; then
+    pick=$("$resolve" 2>/dev/null) || true
+  else
+    pick=$("$resolve") || true
+  fi
+  printf -v "$var" '%s' "$pick"
+  export "${var?}"
+  case "$pick" in nv*) _probe_cache_store "$var" ;; esac
+  return 0
 }
 
 # True when the resolved NVENC element for $codec is the modern CUDA
@@ -372,7 +422,7 @@ _ensure_nvenc_pick() {
 # Self-heals a cold cache via _ensure_nvenc_pick so it's correct even when
 # called from a different subshell than the one that picked the encoder.
 _active_encoder_is_cuda() {
-  _ensure_nvenc_pick "${1:-h264}"
+  _ensure_nvenc_pick "${1:-h264}" quiet
   case "${1:-h264}" in
     h265|hevc) [ "${GS_NVENC_PICK_H265:-}" = "nvcudah265enc" ] ;;
     *)         [ "${GS_NVENC_PICK:-}" = "nvcudah264enc" ] ;;
@@ -380,12 +430,12 @@ _active_encoder_is_cuda() {
 }
 
 # True when GPU scale+convert is usable: not disabled via GS_GPU_SCALE, and
-# both cudaupload + cudaconvertscale exist on this pod. Cached per-process.
+# both cudaupload + cudaconvertscale exist on this pod. Cached per pod.
 _cuda_scale_available() {
   case "${GS_GPU_SCALE:-auto}" in
     0|off|false|no) return 1 ;;
   esac
-  if [ -z "${GS_CUDASCALE_OK:-}" ]; then
+  if ! _probe_cache_load GS_CUDASCALE_OK; then
     if gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
        && gst-inspect-1.0 cudaconvertscale >/dev/null 2>&1; then
       GS_CUDASCALE_OK=1
@@ -393,25 +443,9 @@ _cuda_scale_available() {
       GS_CUDASCALE_OK=0
     fi
     export GS_CUDASCALE_OK
+    _probe_cache_store GS_CUDASCALE_OK
   fi
   [ "$GS_CUDASCALE_OK" = 1 ]
-}
-
-# True when this pod's `cudaupload` advertises DMABuf import on its sink â€” the
-# prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
-# without import support negotiation fails and the consumer dies mid-render). Older
-# gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
-# host-map copy path up front instead of crashing. Cached per-process.
-_cudaupload_dmabuf_ok() {
-  if [ -z "${GS_CUDAUPLOAD_DMABUF:-}" ]; then
-    if gst-inspect-1.0 cudaupload 2>/dev/null | grep -q 'memory:DMABuf'; then
-      GS_CUDAUPLOAD_DMABUF=1
-    else
-      GS_CUDAUPLOAD_DMABUF=0
-    fi
-    export GS_CUDAUPLOAD_DMABUF
-  fi
-  [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
 }
 
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
@@ -496,14 +530,53 @@ compute_cpu_split() {
     # GS_CS2_PIN_MIN_CORES (default 6 â†’ cs2 keeps â‰¥4) we'd hand heavily-threaded
     # cs2 too few exclusive cores, which hurts more than the contention it removes.
     [ -z "${CAPTURE_CPUS+x}" ] && CAPTURE_CPUS="${caplo}-${caphi}"
+    # Streams (not clip batches) also run the HUD (Electron), spec-server and picom
+    # all the time; give them AUX_CORES (default 1) just below the capture cores so
+    # they stop preempting cs2. Only with ≥ GS_AUX_PIN_MIN_CORES (10) cores.
+    local auxn=0
+    if [ -z "${AUX_CPUS+x}" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ] \
+       && [ "$ncpu" -ge "${GS_AUX_PIN_MIN_CORES:-10}" ]; then
+      auxn="${AUX_CORES:-1}"
+      [ "$auxn" -ge 1 ] && AUX_CPUS="$(( caplo - auxn ))-$(( caplo - 1 ))"
+    fi
     if [ -z "${CS2_CPUS+x}" ] && [ "$ncpu" -ge "${GS_CS2_PIN_MIN_CORES:-6}" ]; then
-      CS2_CPUS="0-$(( caplo - 1 ))"
+      CS2_CPUS="0-$(( caplo - auxn - 1 ))"
     fi
   fi
   GS_CAPTURE_CPUS="${CAPTURE_CPUS:-}"
   GS_CS2_CPUS="${CS2_CPUS:-}"
+  GS_AUX_CPUS="${AUX_CPUS:-}"
   GS_CPU_SPLIT_DONE=1
-  export GS_CAPTURE_CPUS GS_CS2_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS
+  export GS_CAPTURE_CPUS GS_CS2_CPUS GS_AUX_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+}
+
+# Set the CPU affinity of <pid>, every thread of it, and all its descendants.
+# Threads and children created later inherit it. Usage: pin_pid_tree <cpus> <pid>
+pin_pid_tree() {
+  local cpus="$1" pid="$2" kid
+  [ -n "$cpus" ] && [ -n "$pid" ] && command -v taskset >/dev/null 2>&1 || return 0
+  taskset -a -p -c "$cpus" "$pid" >/dev/null 2>&1 || return 0
+  for kid in $(pgrep -P "$pid" 2>/dev/null); do pin_pid_tree "$cpus" "$kid"; done
+}
+
+# Apply the CPU split to the running processes. cs2 is started by the already-running
+# Steam client (-applaunch just forwards the command line and exits), so wrapping
+# the launch in taskset never reached it: cs2 ran on every core, capture cores
+# included. Pin it — and, on streams, the HUD/spec-server/picom — once it's up.
+apply_cpu_split() {
+  compute_cpu_split
+  local cs2 p n=0
+  cs2=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+  if [ -n "$cs2" ] && [ -n "$GS_CS2_CPUS" ]; then
+    pin_pid_tree "$GS_CS2_CPUS" "$cs2"
+    log "cpu split: cs2 (pid $cs2) -> cores $GS_CS2_CPUS"
+  fi
+  if [ -n "$GS_AUX_CPUS" ]; then
+    for p in $(pgrep -f '[j]ts-hud-manager') $(pgrep -f '[s]pectator/server.mjs') $(pgrep -x picom); do
+      pin_pid_tree "$GS_AUX_CPUS" "$p"; n=$((n + 1))
+    done
+    log "cpu split: HUD/spec-server/picom ($n procs) -> cores $GS_AUX_CPUS; capture -> ${GS_CAPTURE_CPUS:-all}"
+  fi
 }
 
 # taskset prefix array for cs2: confines cs2 to GS_CS2_CPUS so it never shares a

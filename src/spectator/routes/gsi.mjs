@@ -60,8 +60,11 @@ export function gsiHandler(_req, res, body) {
   bumpActivity();
   reconcileTickFromGsi({ prevRoundPhase, prevPhaseEndsIn });
   sendJson(res, 200, { ok: true });
-  forwardToHud(body);
-  maybeReseedHudOnMapChange(gsiState.mapName);
+  // Batch highlight pods run no hud-manager: forwarding would just fail at ~10Hz.
+  if (process.env.CLIP_BATCH_MODE !== "1") {
+    forwardToHud(body);
+    maybeReseedHudOnMapChange(gsiState.mapName);
+  }
 
   // cs2's first GSI sometimes lands with empty map/phase — wait for
   // real game context before firing the one-shot "playing" beacon or

@@ -24,11 +24,36 @@ export_cs2_shader_cache_env() {
   local _cn _cb
   _cn=$(find "$__GL_SHADER_DISK_CACHE_PATH" -type f 2>/dev/null | wc -l | tr -d ' ')
   _cb=$(du -sh "$__GL_SHADER_DISK_CACHE_PATH" 2>/dev/null | awk '{print $1}')
-  log "cs2 shader cache: path=$__GL_SHADER_DISK_CACHE_PATH size=$__GL_SHADER_DISK_CACHE_SIZE occupancy=${_cb:-?} files=${_cn:-?}"
+  log "cs2 shader cache: steam=$(cs2_shadercache_dir) ($(cs2_shadercache_mib)MiB, what cs2 uses) nvcache=${_cb:-?}/${_cn:-?} files"
 }
 
 shader_log_file() {
   printf '%s/logs/shader_log.txt' "${STEAM_HOME:-/root/.local/share/Steam}"
+}
+
+# Diagnostics for the "Processing Vulkan shaders 0/903" step that now runs on every
+# launch (since Steam dropped ~11.6GB of the cache on 2026-10-03). Steam says why in
+# its own shader_log.txt, which setup-steam wipes at boot for progress parsing, so
+# copy it into our log. Usage: shader_log_report <label> [max_lines]
+shader_log_report() {
+  local label="$1" max="${2:-60}" f n
+  f="$(shader_log_file)"
+  [ -s "$f" ] || { log "steam shader log ($label): empty"; return 0; }
+  n=$(wc -l < "$f" | tr -d ' ')
+  log "steam shader log ($label): last $(( n < max ? n : max )) of $n lines"
+  tail -n "$max" "$f" | sed 's/^/    [shader_log] /' >&2
+}
+
+# Size of each part of cs2's Steam shader cache (driver cache vs Fossilize dbs), so a
+# shrink between runs shows which part Steam or the driver trimmed.
+shader_cache_breakdown() {
+  local d; d="$(cs2_shadercache_dir)"
+  [ -d "$d" ] || return 0
+  # One du per level: du skips anything already counted in the same run.
+  local top sub
+  top=$(du -sm "$d"/* 2>/dev/null | awk '{sub(".*/730/", "", $2); printf "%s=%sMiB ", $2, $1}')
+  sub=$(du -sm "$d"/*/* 2>/dev/null | awk '{sub(".*/730/", "", $2); printf "%s=%sMiB ", $2, $1}')
+  log "cs2 shader cache breakdown: ${top}| ${sub}"
 }
 
 # Steam's Fossilize Vulkan shader cache for cs2 (steamapps/shadercache/730).

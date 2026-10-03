@@ -96,11 +96,17 @@ start_hud() {
   # `?variant=<v>` so the initial layout matches the api-resolved
   # default. --mute-audio so HUD SFX don't leak into the captured
   # stream via the cs2 null sink.
+  # HUD_GPU=0 draws the HUD on the CPU (--enable-transparent-visuals keeps it
+  # see-through). Tested on a replay stream: the skipped frames at camera switches
+  # stayed the same, so they're cs2's own cost and GPU drawing (1) stays the default.
+  local gpu_flags=(--disable-gpu-sandbox)
+  [ "${HUD_GPU:-1}" = "1" ] || gpu_flags=(--disable-gpu --enable-transparent-visuals)
+  log "hud-manager: GPU drawing $([ "${HUD_GPU:-1}" = "1" ] && echo on || echo off) (HUD_GPU=${HUD_GPU:-1})"
   HUD_PORT="$HUD_PORT" \
   GSI_PORT="$HUD_GSI_PORT" \
   HUD_AUTO_OVERLAY=1 \
   HUD_VARIANT="$HUD_MODE" \
-    spawn_logged hud-manager "$HUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio
+    spawn_logged hud-manager "$HUD_BIN" --no-sandbox "${gpu_flags[@]}" --mute-audio
 }
 
 # Wait up to <timeout>s (default 60) for the server to bind. Returns 1 on

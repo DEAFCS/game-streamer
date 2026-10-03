@@ -13,6 +13,36 @@ stream_running() {
   [ -n "$(stream_pid "$1")" ]
 }
 
+# Round trip to MediaMTX in ms: the fastest of a few TCP connects to its API,
+# which runs on the same node as its SRT listener. Prints nothing if MediaMTX
+# can't be reached.
+mediamtx_rtt_ms() {
+  local i timing samples=""
+  for i in 1 2 3; do
+    timing=$(curl -o /dev/null -s --max-time 2 \
+      -w '%{time_namelookup} %{time_connect}' \
+      "$MEDIAMTX_API_BASE/v3/paths/list") || break
+    samples+="$timing"$'\n'
+  done
+  # time_connect includes the DNS lookup; the round trip is the handshake.
+  printf '%s' "$samples" | awk '
+    NF == 2 { ms = ($2 - $1) * 1000; if (best == "" || ms < best) best = ms }
+    END { if (best != "") printf "%.1f\n", best }'
+}
+
+# SRT latency in ms for a round trip to MediaMTX. SRT holds every packet for
+# this long so lost ones can be resent in time, which takes a few round trips:
+# 4x the round trip, never under 120ms, the floor MediaMTX's SRT listener
+# enforces anyway (it takes the larger of its own 120 and ours). 200ms when the
+# round trip is unknown, which held up everywhere before it was measured.
+srt_latency_for_rtt() {
+  if [ -z "$1" ]; then
+    echo 200
+    return
+  fi
+  awk -v rtt="$1" 'BEGIN { ms = int(rtt * 4 + 0.999); print (ms < 120 ? 120 : ms) }'
+}
+
 # start_capture <stream-id> [fps] [video-kbps] [show-pointer] [audio]
 #   audio: 1 to include PulseAudio leg (default), 0 video-only
 start_capture() {
@@ -21,7 +51,10 @@ start_capture() {
   local kbps="${3:-4000}"
   local pointer="${4:-true}"
   local audio="${5:-${CAPTURE_AUDIO:-1}}"
-  local gop=$(( fps * 2 ))
+  # One keyframe a second. A viewer can only start decoding at a keyframe, and
+  # MediaMTX can't ask an SRT publisher for one, so joining the stream and
+  # recovering from packet loss both wait for the next one.
+  local gop="$fps"
   local url="${MEDIAMTX_SRT_BASE}?streamid=publish:${stream_id}"
   local pulse_sink="${PULSE_SINK_NAME:-cs2}"
   local gst_tag="gst-${stream_id:0:8}"
@@ -43,7 +76,19 @@ start_capture() {
 
   log "starting capture '${stream_id}' (${out_w}x${out_h}@${fps}fps kbps=$kbps audio=$audio) -> $url"
 
-  # LIVE_VIDEO_CODEC=h265|h264. Default h264 â€” falls back to h264 if no NVENC HEVC.
+  # Sized from this node's round trip to MediaMTX, so a far node gets the
+  # headroom it needs and a near one adds no delay. SRT_LATENCY_MS overrides it.
+  local srt_latency="${SRT_LATENCY_MS:-}"
+  if [ -n "$srt_latency" ]; then
+    log "  SRT latency ${srt_latency}ms (SRT_LATENCY_MS)"
+  else
+    local rtt
+    rtt=$(mediamtx_rtt_ms)
+    srt_latency=$(srt_latency_for_rtt "$rtt")
+    log "  SRT latency ${srt_latency}ms (round trip to MediaMTX: ${rtt:-unreachable}${rtt:+ms})"
+  fi
+
+  # LIVE_VIDEO_CODEC=h265|h264. Default h264 — falls back to h264 if no NVENC HEVC.
   # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
   local codec="${LIVE_VIDEO_CODEC:-h264}"
   local enc="" parse=""
@@ -113,11 +158,28 @@ start_capture() {
   # stale copy so a non-composite path doesn't look composite.
   local hud_ctl="${LOG_DIR:-/tmp/game-streamer}/hud-visible"
   rm -f "$hud_ctl"
-  if vkcapture_available \
-     && pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1 \
-     && command -v find_hud_overlay_window >/dev/null 2>&1; then
-    hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
+  # The HUD window can be briefly missing at stream start (run-demo reloads the
+  # overlay right before this), and one miss silently left a whole replay stream on
+  # the ximagesrc grab — no pacing, no present-hook. Wait for it (HUD_COMPOSITE_WAIT_S,
+  # 10s) and say why when the composite isn't used.
+  local why=""
+  if ! vkcapture_available; then
+    why="vkcapture unavailable"
+  elif ! pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1; then
+    why="cs2 not running"
+  elif ! command -v find_hud_overlay_window >/dev/null 2>&1; then
+    why="no HUD support loaded"
+  else
+    local waited=0
+    while :; do
+      hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
+      [ -n "$hud_xid" ] && break
+      [ "$waited" -ge "${HUD_COMPOSITE_WAIT_S:-10}" ] && { why="HUD overlay window not found after ${waited}s"; break; }
+      sleep 1; waited=$((waited + 1))
+    done
+    [ -n "$hud_xid" ] && [ "$waited" -gt 0 ] && log "  composite: HUD overlay window appeared after ${waited}s"
   fi
+  [ -n "$why" ] && log "  composite unavailable ($why) — ximagesrc grab, no pacing"
   if [ -n "$hud_xid" ]; then
     log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
     # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
@@ -139,9 +201,9 @@ start_capture() {
 $cs2_src \
 $hud_src \
 pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
-mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false"
+mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false"
     else
-      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false \
+      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false \
 $cs2_src \
 $hud_src"
     fi
@@ -170,6 +232,21 @@ $hud_src"
       capture_pin=(taskset -c "$GS_CAPTURE_CPUS")
       log "  capture pinned to cores $GS_CAPTURE_CPUS (cs2 confined to ${GS_CS2_CPUS:-all})"
     fi
+    # Grid pacing, as for clips (LIVE_PACE, on by default; 0 = off). cs2 renders at
+    # fps_max 2x$fps and overshoots its own limiter, so stamping arrivals by wall clock
+    # and thinning with videorate stepped 2-3 presents at a time (uneven motion). The
+    # layer now paces presents onto an exact $fps grid, a late frame skips the slots it
+    # missed, and each frame is stamped by slot count (re-anchored to the clock if the
+    # render ever lags) — so videorate passes every frame through.
+    # The frame handoff (LIVE_FRAME_HANDOFF=1) is off by default here: on a replay
+    # stream it skipped 5-20 frames a second during rounds, likely cs2 waiting on reads
+    # slowed by the HUD grab and compositor sharing the 2 capture cores.
+    if [ "${LIVE_PACE:-1}" = "1" ]; then
+      export VKCAP_FRAME_PTS=1 VKCAP_PACE_FPS="$fps" VKCAP_PACE_SKIP=1
+    else
+      unset VKCAP_FRAME_PTS VKCAP_PACE_FPS VKCAP_PACE_SKIP
+    fi
+    export VKCAP_FRAME_ACK="${LIVE_FRAME_HANDOFF:-0}"
     spawn_logged "$gst_tag" "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     sleep 1
     if kill -0 "$SPAWNED_PID" 2>/dev/null; then
@@ -204,7 +281,7 @@ $hud_src"
           ! opusparse \
           ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
         mpegtsmux name=mux alignment=7 \
-          ! srtsink uri="$url" latency=200 auto-reconnect=false
+          ! srtsink uri="$url" latency="$srt_latency" auto-reconnect=false
     else
       spawn_logged "$gst_tag" gst-launch-1.0 -e \
         ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
@@ -214,7 +291,7 @@ $hud_src"
           ! $enc \
           ! $parse \
           ! mpegtsmux alignment=7 \
-          ! srtsink uri="$url" latency=200 auto-reconnect=false
+          ! srtsink uri="$url" latency="$srt_latency" auto-reconnect=false
     fi
   fi
 

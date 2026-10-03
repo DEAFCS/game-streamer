@@ -106,8 +106,13 @@ disable_cloud_in_config_vdf
 disable_cs2_cloud
 print_cloud_state
 
-# Wipe Steam logs we detect from â€” never rotated, so stale lines get re-detected
-# every run (cloud conflict, shader + validate progress).
+# Wipe Steam logs we detect from — never rotated, so stale lines get re-detected
+# every run (cloud conflict, shader + validate progress). Keep the end of the last
+# run's shader log first: Steam notes cache cleanups there when a session ends.
+if [ -s "$STEAM_HOME/logs/shader_log.txt" ]; then
+  log "steam shader log (previous run): last 30 lines"
+  tail -n 30 "$STEAM_HOME/logs/shader_log.txt" | sed 's/^/    [shader_log] /' >&2
+fi
 for _lg in cloud_log shader_log content_log; do
   rm -f "$STEAM_HOME/logs/${_lg}.txt" 2>/dev/null
 done

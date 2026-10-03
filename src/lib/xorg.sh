@@ -284,6 +284,10 @@ stop_xorg() {
 
 # Orderly end-of-pod teardown: GPU clients first, then the X server.
 shutdown_display() {
+  # Always SIGKILL Steam. A clean exit (steam -shutdown) lets Steam run its exit-time
+  # shader maintenance: it consolidated away ~15GB of cs2's recorded pipeline caches
+  # and dropped entries as "Mismatching key", and every launch after that replayed
+  # ~26k pipelines (~9 minutes) before cs2 could start.
   declare -F kill_steam >/dev/null 2>&1 && kill_steam
   sleep 1
   stop_xorg || true

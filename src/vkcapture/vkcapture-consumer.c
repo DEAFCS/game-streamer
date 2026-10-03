@@ -47,12 +47,43 @@
 #include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
-#include <gst/allocators/allocators.h>   // GstDmaBufAllocator — zero-copy dmabuf wrap
-#include <gst/video/video.h>             // GstVideoMeta — stride/offset on the dmabuf
+#include <gst/video/video.h>             // GstVideoFrame — map the CUDA buffers' planes
+#define GST_USE_UNSTABLE_API               // gst-cuda is "unstable"; we use a small, long-lived subset
+#include <gst/cuda/gstcuda.h>              // zero-copy: CUDA context, buffer pool, CuMemcpy2DAsync
+#include <dlfcn.h>
 
 #include "capture.h"
 
 static const char SOCK_NAME[] = "/com/obsproject/vkcapture";
+
+// CUDA external-memory import (the cuda.h ABI, unchanged since CUDA 10). gst-cuda
+// doesn't export these and the image carries no CUDA SDK, so they're resolved from
+// libcuda at runtime (cuda_init).
+typedef struct CUextMemory_st *CUexternalMemory;
+typedef struct {
+    int type;                                   // CUexternalMemoryHandleType
+    union {
+        int fd;
+        struct { void *handle; const void *name; } win32;
+        const void *nvSciBufObject;
+    } handle;
+    unsigned long long size;
+    unsigned int flags;
+    unsigned int reserved[16];
+} CudaExtMemHandleDesc;                         // CUDA_EXTERNAL_MEMORY_HANDLE_DESC
+typedef struct {
+    unsigned long long offset;
+    unsigned long long size;
+    unsigned int flags;
+    unsigned int reserved[16];
+} CudaExtMemBufferDesc;                         // CUDA_EXTERNAL_MEMORY_BUFFER_DESC
+#define CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD 1
+#define CUDA_EXTERNAL_MEMORY_DEDICATED           0x1
+static struct {
+    CUresult (*import)(CUexternalMemory *mem, const CudaExtMemHandleDesc *desc);
+    CUresult (*map_buffer)(CUdeviceptr *ptr, CUexternalMemory mem, const CudaExtMemBufferDesc *desc);
+    CUresult (*destroy)(CUexternalMemory mem);
+} cu_ext;
 
 // ---- runtime state --------------------------------------------------------
 struct state {
@@ -82,13 +113,20 @@ struct state {
     void      *map_ptr;
     size_t     map_len;
 
-    // zero-copy: when set (VKCAP_ZEROCOPY=1), the layer hands us a DEVICE-LOCAL
-    // dmabuf (map_host=0) and we wrap its fd straight into a GstBuffer for
-    // `cudaupload` to import on the GPU — no host map, no CPU pixel copy, no PCIe
-    // readback. Off (default): the host-mapped wc_copy path below. Auto-disabled at
-    // runtime if the layer reports a flipped image (can't cheaply GPU-flip a dmabuf).
-    bool        zerocopy;
-    GstAllocator *dmabuf_alloc;  // shared GstDmaBufAllocator for the wrapped fds
+    // Zero-copy (VKCAP_ZEROCOPY=1, needs the CUDA encode chain): the layer exports
+    // the shared image as an OPAQUE_FD that CUDA imports, and each frame is one
+    // GPU-to-GPU copy into a pooled CUDA buffer pushed as memory:CUDAMemory — it
+    // never crosses PCIe or touches the CPU. When the import isn't possible (old
+    // layer, a driver that can't export it, the import fails) we ask for the
+    // host-mapped image instead and upload each frame from it: same caps, just the
+    // old copy cost. Off (default): the host-mapped wc_copy path below.
+    bool        zerocopy;          // output CUDA memory (appsrc caps memory:CUDAMemory)
+    bool        cuda_import;       // ask for / use the OPAQUE_FD import (else host map + upload)
+    GstCudaContext *cuda_ctx;
+    GstBufferPool  *cuda_pool;
+    GstVideoInfo    cuda_info;
+    CUexternalMemory cuda_ext;
+    CUdeviceptr     cuda_src;      // the imported shared image; 0 when not imported
 
     // gstreamer
     GstElement *pipeline;
@@ -111,7 +149,40 @@ struct state {
     int         present_efd;
     guint       present_src;
     bool        present_locked;   // engaged: presents drive the push, timer off
-    guint64     present_signals;  // VKCAP_DEBUG: total presents seen
+    guint64     present_signals;  // VKCAP_DEBUG: total presents (grid slots) seen
+    guint64     dbg_wakeups;      // VKCAP_DEBUG: present wakeups since the last tick
+    gint64      dbg_read_us_sum;  // VKCAP_DEBUG: wakeup -> frame pushed, summed / max per tick
+    gint64      dbg_read_us_max;
+    // Fixed-timestep capture (VKCAP_FRAME_PTS=1, clips only): cs2 runs with
+    // host_framerate = fps, so every present is exactly 1/fps of game time. Stamp
+    // present N at base + N/fps instead of its wall-clock arrival, so a render spike
+    // or catch-up burst never turns into a videorate dup/drop. VKCAP_PACE_FPS asks
+    // the (patched) layer to hold presents to that exact rate so game time tracks
+    // wall-clock (and the live pulsesrc audio) as closely as possible. Frame-count
+    // PTS only engages (fixed_ts) once the layer echoes that pacing back — without
+    // it presents run at cs2's own rate and counting them would change the speed.
+    bool        frame_pts;
+    int         pace_fps;
+    bool        pace_skip;        // VKCAP_PACE_SKIP: grid pacing — late frames skip slots, game time untouched
+    bool        fixed_ts;         // engaged: layer confirmed pacing, frame-count PTS
+    GstClockTime pts_base;        // running time of present 0 (moves on a re-anchor)
+    GstClockTime pts_first;       // PTS of the first stamped frame
+    GstClockTime pts_last;        // PTS of the latest stamped frame
+    GstClockTime pts_first_rt;    // running time of the first stamped frame
+    GstClockTime pts_last_rt;     // running time of the latest stamped frame
+    guint64     pts_frames;       // presents stamped so far (game steps)
+    guint64     pts_reanchors;    // times the stamps were pulled back to the clock
+    const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
+    // Frame handoff (VKCAP_FRAME_ACK=1): the layer pokes only once the
+    // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
+    // the next copy until we report the read done on ack_fd (a SEQPACKET socketpair;
+    // the peer end goes to the layer). Without it the poke raced the copy, so a read
+    // got the previous frame or a torn one.
+    bool        frame_ack;
+    int         ack_fd;           // our end: we send the running count of presents read
+    int         ack_peer;         // the layer's end, passed via SCM_RIGHTS
+    bool        handoff;          // engaged: the layer echoed frame_ack
+    guint64     ack_count;        // presents read since the fds were (re)sent
     guint64     dbg_last;         // VKCAP_DEBUG: present_signals at last debug tick
     bool        debug;
 
@@ -161,19 +232,6 @@ static const char *fourcc_to_gst(uint32_t f)
     }
 }
 
-// Same mapping as fourcc_to_gst but to the GstVideoFormat enum, for the
-// GstVideoMeta we attach to zero-copy dmabuf buffers (stride/offset metadata).
-static GstVideoFormat fourcc_to_gst_vfmt(uint32_t f)
-{
-    switch (f) {
-    case DRM_FORMAT_XRGB8888:
-    case DRM_FORMAT_ARGB8888: return GST_VIDEO_FORMAT_BGRx;
-    case DRM_FORMAT_XBGR8888:
-    case DRM_FORMAT_ABGR8888: return GST_VIDEO_FORMAT_RGBx;
-    default:                  return GST_VIDEO_FORMAT_UNKNOWN;
-    }
-}
-
 static void fourcc_str(uint32_t f, char out[5])
 {
     out[0] = (char)(f & 0xff);
@@ -194,8 +252,20 @@ static void log_msg(const char *fmt, ...)
 }
 
 // ---- frame buffer teardown -----------------------------------------------
+static void release_cuda_import(void)
+{
+    if (!st.cuda_ext) return;
+    gst_cuda_context_push(st.cuda_ctx);
+    if (st.cuda_src) CuMemFree(st.cuda_src);
+    cu_ext.destroy(st.cuda_ext);
+    gst_cuda_context_pop(NULL);
+    st.cuda_ext = NULL;
+    st.cuda_src = 0;
+}
+
 static void release_frame(void)
 {
+    release_cuda_import();
     if (st.map_ptr) { munmap(st.map_ptr, st.map_len); st.map_ptr = NULL; st.map_len = 0; }
     for (int i = 0; i < st.nfd; i++) {
         if (st.fds[i] >= 0) { close(st.fds[i]); st.fds[i] = -1; }
@@ -220,40 +290,56 @@ static bool geometry_ok(const struct capture_texture_data *td, int nfd)
 
 // ---- control: tell the layer to start producing --------------------------
 // Default: request a LINEAR, host-visible, no-modifier dmabuf so we can mmap +
-// memcpy it with the CPU. Zero-copy (st.zerocopy): request map_host=0 so the
-// shared image stays DEVICE-LOCAL — we wrap its fd into a GstBuffer for cudaupload
-// to import on the GPU, so the CPU never touches a pixel. Still LINEAR + no
-// modifiers (keeps the consumer's video-meta simple; the layer's per-present blit
-// into the shared image is inherent either way). (device_uuid left zero — single
-// GPU; the layer allocates on its own device.)
+// memcpy it with the CPU. Zero-copy import (st.cuda_import): request map_host=0 and
+// an OPAQUE_FD export, so the shared image stays DEVICE-LOCAL and CUDA imports it.
+// Still LINEAR + no modifiers, so it maps as a plain pitched buffer. (device_uuid
+// left zero — single GPU; the layer allocates on its own device.)
 static void send_control(int fd, bool capturing)
 {
     struct capture_control_data c = {0};
     c.capturing    = capturing ? 1 : 0;
     c.no_modifiers = 1;
     c.linear       = 1;
-    c.map_host     = st.zerocopy ? 0 : 1;
+    c.map_host       = (st.zerocopy && st.cuda_import) ? 0 : 1;
+    c.want_opaque_fd = (st.zerocopy && st.cuda_import) ? 1 : 0;
 
     // Ask the layer to poke us per present, handing it our eventfd via SCM_RIGHTS.
     // A patched layer reads want_present_signal + the fd; an unpatched layer treats
     // both as padding and ignores them — we stay on the fps timer (graceful).
     if (capturing && st.present_efd >= 0)
         c.want_present_signal = 1;
+    // Unpatched/older layers treat this as padding too: no pacing, cs2's own fps_max.
+    if (capturing && st.pace_fps > 0 && st.pace_fps <= 255) {
+        c.pace_fps = (uint8_t)st.pace_fps;
+        c.pace_skip = st.pace_skip ? 1 : 0;
+    }
+    // Frame handoff: every read is synchronous (the CPU copy, or the CUDA copy we wait
+    // on), so acking after push_one_frame really means "done with the image". A layer
+    // without handoff takes just the first fd (the kernel drops the second).
+    if (c.want_present_signal && st.frame_ack && st.ack_peer >= 0)
+        c.want_frame_ack = 1;
 
     struct iovec io = { .iov_base = &c, .iov_len = sizeof(c) };
     struct msghdr msg = {0};
     msg.msg_iov = &io;
     msg.msg_iovlen = 1;
-    char cmsg_buf[CMSG_SPACE(sizeof(int))];
+    char cmsg_buf[CMSG_SPACE(sizeof(int) * 2)];
     if (c.want_present_signal) {
+        const int nfds = c.want_frame_ack ? 2 : 1;
+        const int fds[2] = { st.present_efd, st.ack_peer };
         msg.msg_control = cmsg_buf;
         msg.msg_controllen = sizeof(cmsg_buf);
         struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
         cm->cmsg_level = SOL_SOCKET;
         cm->cmsg_type  = SCM_RIGHTS;
-        cm->cmsg_len   = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(cm), &st.present_efd, sizeof(int));
+        cm->cmsg_len   = CMSG_LEN(sizeof(int) * nfds);
+        memcpy(CMSG_DATA(cm), fds, sizeof(int) * nfds);
         msg.msg_controllen = cm->cmsg_len;
+        // The layer restarts its poke count with these fds: restart ours too, and
+        // drop pokes still queued from before so they can't count as reads.
+        uint64_t stale;
+        while (read(st.present_efd, &stale, sizeof(stale)) == sizeof(stale)) {}
+        st.ack_count = 0;
     }
 
     ssize_t n = sendmsg(fd, &msg, MSG_NOSIGNAL);
@@ -277,16 +363,33 @@ static void set_caps_if_needed(void)
         "height",    G_TYPE_INT, st.height,
         "framerate", GST_TYPE_FRACTION, st.fps, 1,
         NULL);
-    // Zero-copy: tag the caps with the DMABuf memory feature so downstream
-    // negotiates the dmabuf import (cudaupload) instead of expecting system memory.
-    if (st.zerocopy)
-        gst_caps_set_features_simple(caps, gst_caps_features_new("memory:DMABuf", NULL));
+    if (st.zerocopy) {
+        // CUDA memory out, from a pool on our context (shared with the pipeline). A
+        // new swapchain geometry gets a new pool.
+        gst_caps_set_features_simple(caps, gst_caps_features_new(GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY, NULL));
+        if (st.cuda_pool) {
+            gst_buffer_pool_set_active(st.cuda_pool, FALSE);
+            gst_object_unref(st.cuda_pool);
+            st.cuda_pool = NULL;
+        }
+        GstBufferPool *pool = gst_cuda_buffer_pool_new(st.cuda_ctx);
+        GstStructure *cfg = gst_buffer_pool_get_config(pool);
+        gst_video_info_from_caps(&st.cuda_info, caps);
+        gst_buffer_pool_config_set_params(cfg, caps, (guint)st.cuda_info.size, 4, 0);
+        if (gst_buffer_pool_set_config(pool, cfg) && gst_buffer_pool_set_active(pool, TRUE)) {
+            st.cuda_pool = pool;
+        } else {
+            log_msg("ERROR: zero-copy: CUDA buffer pool setup failed — no frames will be pushed");
+            gst_object_unref(pool);
+        }
+    }
     gst_app_src_set_caps(st.appsrc, caps);
     gst_caps_unref(caps);
     st.caps_set = true;
     log_msg("appsrc caps: %s %dx%d @%dfps (stride0=%d flip=%d%s)",
             gfmt, st.width, st.height, st.fps, st.strides[0], st.flip,
-            st.zerocopy ? " memory:DMABuf zero-copy" : "");
+            !st.zerocopy ? "" : st.cuda_src ? " memory:CUDAMemory, zero-copy import"
+                                            : " memory:CUDAMemory, uploaded from the host map");
 }
 
 // Streaming-load (MOVNTDQA) copy for the layer's write-combined GPU buffer:
@@ -349,12 +452,19 @@ static void signal_armed(void)
     st.ready_signalled = true;
     st.armed_us = g_get_monotonic_time();
     if (st.ready_path) {
-        FILE *f = fopen(st.ready_path, "w");
+        // Content tells the renderer whether cs2 may go on a fixed timestep. Written
+        // to a temp name and renamed so the waiter never sees an empty file.
+        char *tmp = g_strdup_printf("%s.tmp", st.ready_path);
+        FILE *f = fopen(tmp, "w");
         if (f) {
+            fprintf(f, "paced=%d\n", st.fixed_ts ? 1 : 0);
             fclose(f);
+            if (rename(tmp, st.ready_path) != 0)
+                log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
         } else {
             log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
         }
+        g_free(tmp);
     }
     log_msg("armed%s", st.start_path ? " — holding for start gate" : "");
 }
@@ -378,11 +488,149 @@ static bool start_gate_open(void)
     return st.started;
 }
 
+// How far frame-count stamps may trail the clock before they're re-anchored.
+#define FRAME_PTS_MAX_LAG (250 * GST_MSECOND)
+
+// Pipeline running time now (clock - base_time): the timeline pulsesrc stamps on.
+static GstClockTime running_time_now(void)
+{
+    GstClockTime rt = 0;
+    GstClock *clk = gst_element_get_clock(st.pipeline);
+    if (clk) {
+        GstClockTime now = gst_clock_get_time(clk);
+        GstClockTime base = gst_element_get_base_time(st.pipeline);
+        if (now > base) rt = now - base;
+        gst_object_unref(clk);
+    }
+    return rt;
+}
+
+// ---- zero-copy (CUDA) -------------------------------------------------------
+// Load CUDA through gst-cuda, resolve the external-memory calls and make the
+// context we share with the pipeline. False => no CUDA at all (host-map only).
+static bool cuda_init(void)
+{
+    if (!gst_cuda_load_library()) {
+        log_msg("WARN: zero-copy: CUDA library unavailable");
+        return false;
+    }
+    st.cuda_ctx = gst_cuda_context_new(0);
+    if (!st.cuda_ctx) {
+        log_msg("WARN: zero-copy: couldn't create a CUDA context on device 0");
+        return false;
+    }
+    void *lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (lib) {
+        *(void **)&cu_ext.import     = dlsym(lib, "cuImportExternalMemory");
+        *(void **)&cu_ext.map_buffer = dlsym(lib, "cuExternalMemoryGetMappedBuffer");
+        *(void **)&cu_ext.destroy    = dlsym(lib, "cuDestroyExternalMemory");
+    }
+    st.cuda_import = cu_ext.import && cu_ext.map_buffer && cu_ext.destroy;
+    if (!st.cuda_import)
+        log_msg("WARN: zero-copy: libcuda has no external-memory import — uploading from the host map");
+    return true;
+}
+
+static const char *cu_err(CUresult r)
+{
+    const char *name = NULL;
+    if (CuGetErrorName(r, &name) != CUDA_SUCCESS || !name) return "?";
+    return name;
+}
+
+// Import the layer's OPAQUE_FD export and map it as one linear buffer.
+static bool cuda_import_texture(const struct capture_texture_data *td)
+{
+    if (!td->opaque_fd || td->mem_size == 0) {
+        log_msg("WARN: zero-copy: the layer didn't export an OPAQUE_FD (image predates it, or the driver refused)");
+        return false;
+    }
+    if ((uint64_t)st.offsets[0] + (uint64_t)st.strides[0] * (uint64_t)st.height > td->mem_size) {
+        log_msg("WARN: zero-copy: image doesn't fit its %llu-byte export", (unsigned long long)td->mem_size);
+        return false;
+    }
+    int dfd = dup(st.fds[0]);   // a successful import takes ownership of the fd
+    if (dfd < 0) return false;
+    CudaExtMemHandleDesc hd;
+    memset(&hd, 0, sizeof(hd));
+    hd.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
+    hd.handle.fd = dfd;
+    hd.size = td->mem_size;
+    hd.flags = CUDA_EXTERNAL_MEMORY_DEDICATED;   // the layer always allocates it dedicated
+    if (!gst_cuda_context_push(st.cuda_ctx)) { close(dfd); return false; }
+    CUresult r = cu_ext.import(&st.cuda_ext, &hd);
+    if (r != CUDA_SUCCESS) {
+        close(dfd);
+        st.cuda_ext = NULL;
+        gst_cuda_context_pop(NULL);
+        log_msg("WARN: zero-copy: cuImportExternalMemory failed (%s)", cu_err(r));
+        return false;
+    }
+    CudaExtMemBufferDesc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.size = td->mem_size;
+    r = cu_ext.map_buffer(&st.cuda_src, st.cuda_ext, &bd);
+    gst_cuda_context_pop(NULL);
+    if (r != CUDA_SUCCESS) {
+        st.cuda_src = 0;
+        release_cuda_import();
+        log_msg("WARN: zero-copy: cuExternalMemoryGetMappedBuffer failed (%s)", cu_err(r));
+        return false;
+    }
+    return true;
+}
+
+// Copy the shared image into a CUDA buffer and wait for it, so the image is free
+// for the layer's next copy once we return (the frame handoff acks after this).
+static bool cuda_copy_frame(GstBuffer *buf)
+{
+    GstVideoFrame vf;
+    if (!gst_video_frame_map(&vf, &st.cuda_info, buf, GST_MAP_WRITE | GST_MAP_CUDA)) {
+        log_msg("WARN: zero-copy: couldn't map a CUDA buffer");
+        return false;
+    }
+    const CUdeviceptr dst = (CUdeviceptr)GST_VIDEO_FRAME_PLANE_DATA(&vf, 0);
+    const size_t dst_pitch = (size_t)GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 0);
+    const size_t src_pitch = (size_t)st.strides[0];
+    CUDA_MEMCPY2D c;
+    memset(&c, 0, sizeof(c));
+    c.srcMemoryType = st.cuda_src ? CU_MEMORYTYPE_DEVICE : CU_MEMORYTYPE_HOST;
+    c.srcPitch = src_pitch;
+    c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    c.dstPitch = dst_pitch;
+    c.WidthInBytes = (size_t)st.width * 4;
+    CUresult r = CUDA_SUCCESS;
+    bool ok = gst_cuda_context_push(st.cuda_ctx);
+    if (ok) {
+        // A bottom-up image is copied a row at a time, last source row first.
+        const int rows = st.flip ? st.height : 1;
+        c.Height = st.flip ? 1 : (size_t)st.height;
+        for (int y = 0; y < rows && r == CUDA_SUCCESS; y++) {
+            const size_t src_row = st.flip ? (size_t)(st.height - 1 - y) : 0;
+            if (st.cuda_src)
+                c.srcDevice = st.cuda_src + (CUdeviceptr)st.offsets[0] + src_row * src_pitch;
+            else
+                c.srcHost = (const uint8_t *)st.map_ptr + st.offsets[0] + src_row * src_pitch;
+            c.dstDevice = dst + (CUdeviceptr)y * dst_pitch;
+            r = CuMemcpy2DAsync(&c, NULL);
+        }
+        if (r == CUDA_SUCCESS) r = CuStreamSynchronize(NULL);
+        gst_cuda_context_pop(NULL);
+    }
+    gst_video_frame_unmap(&vf);
+    if (!ok || r != CUDA_SUCCESS) {
+        log_msg("WARN: zero-copy: CUDA frame copy failed (%s)", ok ? cu_err(r) : "context push");
+        return false;
+    }
+    return true;
+}
+
 // Build a buffer from the current shared frame (or repeat the last good frame
 // while the layer is transiently gone) and push it into the pipeline. Shared by
-// the fps timer (on_tick) and the per-present signal (on_present_signal).
+// the fps timer (on_tick) and the per-present signal (on_present_signal). `steps`
+// is how many presents this push stands for (>1 when eventfd pokes coalesced).
 // Returns false to stop the main loop.
-static bool push_one_frame(void)
+static bool push_one_frame(guint64 steps)
 {
     if (!st.appsrc) return true;
     // Hold in READY until we have a frame AND the gate is open, then go PLAYING so
@@ -396,28 +644,17 @@ static bool push_one_frame(void)
 
     GstBuffer *out = NULL;
 
-    if (st.have_frame && st.zerocopy && st.fds[0] >= 0) {
-        // Zero-copy: wrap the device-local dmabuf fd straight into a GstBuffer.
-        // dup() because the dmabuf allocator takes ownership of the fd it's given
-        // and closes it when the buffer is released — we keep st.fds[0] alive for
-        // the swapchain's lifetime. cudaupload downstream imports + GPU-copies it;
-        // the CPU never maps the pixels. (Single shared image, overwritten on the
-        // next present — same one-texture model as obs-vkcapture itself; present-
-        // lock pushes right after a present so the import wins the race.)
+    if (st.have_frame && st.zerocopy && (st.cuda_src || st.map_ptr)) {
+        // Zero-copy: one GPU copy (or, on the fallback, an upload from the host map)
+        // into a pooled CUDA buffer. The shared image is overwritten on the next
+        // present, so this is a copy, just never through the CPU when imported.
         set_caps_if_needed();
-        int dfd = dup(st.fds[0]);
-        if (dfd < 0) return true;  // transient; next present re-pushes
-        const gsize sz = (gsize)st.strides[0] * (gsize)st.height + (gsize)st.offsets[0];
-        GstMemory *mem = gst_dmabuf_allocator_alloc(st.dmabuf_alloc, dfd, sz);
-        if (!mem) { close(dfd); return true; }
-        GstBuffer *buf = gst_buffer_new();
-        gst_buffer_append_memory(buf, mem);  // takes the dfd-owning memory
-        GstVideoFormat vfmt = fourcc_to_gst_vfmt(st.fourcc);
-        if (vfmt == GST_VIDEO_FORMAT_UNKNOWN) vfmt = GST_VIDEO_FORMAT_BGRx;
-        gsize off[GST_VIDEO_MAX_PLANES] = { (gsize)st.offsets[0], 0, 0, 0 };
-        gint  strd[GST_VIDEO_MAX_PLANES] = { st.strides[0], 0, 0, 0 };
-        gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE, vfmt,
-                                       st.width, st.height, 1, off, strd);
+        GstBuffer *buf = NULL;
+        if (!st.cuda_pool || gst_buffer_pool_acquire_buffer(st.cuda_pool, &buf, NULL) != GST_FLOW_OK)
+            return true;
+        if (!cuda_copy_frame(buf)) { gst_buffer_unref(buf); return true; }
+        if (st.last_buf) gst_buffer_unref(st.last_buf);
+        st.last_buf = gst_buffer_ref(buf);
         out = buf;  // push (transfers ownership)
     } else if (st.have_frame && st.map_ptr) {
         set_caps_if_needed();
@@ -465,7 +702,39 @@ static bool push_one_frame(void)
         return true;  // nothing captured yet
     }
 
-    // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
+    if (st.fixed_ts) {
+        // Present N = base + N/fps. The base is the pipeline running time at the first
+        // frame, the same timeline pulsesrc stamps audio on, so A/V start together.
+        // Coalesced pokes advance N by every present they stand for, so the timeline
+        // stays one step per present (videorate fills the gap with a repeat).
+        GstClockTime rt = running_time_now();
+        if (st.pts_frames == 0) { st.pts_base = rt; st.pts_first_rt = rt; }
+        if (steps < 1) steps = 1;
+        st.pts_frames += steps;
+        st.pts_last_rt = rt;
+        GstClockTime pts = st.pts_base + gst_util_uint64_scale(st.pts_frames - 1, GST_SECOND, st.fps);
+        // If the render can't hold the rate, game time (and these stamps) fall behind
+        // the wall clock the live audio runs on, and the muxer's audio queue backs up
+        // until the audio source blocks — at EOS that deadlocked the whole pipeline.
+        // Bound the lag: past it, re-anchor the count to the clock (the slowdown then
+        // shows as videorate repeats instead of piling up).
+        if (rt > pts + FRAME_PTS_MAX_LAG) {
+            const GstClockTime shift = rt - FRAME_PTS_MAX_LAG - pts;
+            st.pts_base += shift;
+            pts += shift;
+            if (st.pts_reanchors++ == 0)
+                log_msg("WARN: render fell %" G_GUINT64_FORMAT "ms behind the %dfps timestep — re-anchoring frame stamps to the clock",
+                        (guint64)((shift + FRAME_PTS_MAX_LAG) / GST_MSECOND), st.fps);
+        }
+        if (st.pts_frames == steps) st.pts_first = pts;
+        st.pts_last = pts;
+        out = gst_buffer_make_writable(out);   // a held last_buf is shared
+        GST_BUFFER_PTS(out) = pts;
+        GST_BUFFER_DTS(out) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DURATION(out) = gst_util_uint64_scale(1, GST_SECOND, st.fps);
+    }
+
+    // Default: PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
     // Present-driven pushing feeds videorate distinct, render-aligned frames, so it
     // corrects only on a real cs2 frame dip (not timer phase-drift dups). Video
     // rides the same live clock as the pulsesrc audio, so A/V stays synced and the
@@ -484,7 +753,7 @@ static gboolean on_tick(gpointer user)
 {
     (void)user;
     if (st.present_locked) return G_SOURCE_REMOVE;  // presents drive the push now
-    return push_one_frame() ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+    return push_one_frame(1) ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
 }
 
 // First present poke from a patched layer: switch from the wall-clock timer to
@@ -511,7 +780,20 @@ static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
     if (n != (ssize_t)sizeof(cnt)) return G_SOURCE_CONTINUE;  // spurious / EAGAIN
     if (!st.present_locked) engage_present_lock();
     st.present_signals += cnt;
-    if (!push_one_frame()) { st.present_src = 0; return G_SOURCE_REMOVE; }
+    const gint64 t0 = g_get_monotonic_time();
+    const bool ok = push_one_frame(cnt);
+    const gint64 took = g_get_monotonic_time() - t0;
+    st.dbg_wakeups++;
+    st.dbg_read_us_sum += took;
+    if (took > st.dbg_read_us_max) st.dbg_read_us_max = took;
+    // The frame is copied out (or deliberately skipped): release the shared image to
+    // the layer's next copy. The running total makes a late ack harmless.
+    if (st.handoff && st.ack_fd >= 0) {
+        st.ack_count += cnt;
+        ssize_t w = send(st.ack_fd, &st.ack_count, sizeof(st.ack_count), MSG_DONTWAIT | MSG_NOSIGNAL);
+        (void)w;
+    }
+    if (!ok) { st.present_src = 0; return G_SOURCE_REMOVE; }
     return G_SOURCE_CONTINUE;
 }
 
@@ -522,9 +804,27 @@ static gboolean on_debug_tick(gpointer user)
     (void)user;
     guint64 d = st.present_signals - st.dbg_last;
     st.dbg_last = st.present_signals;
-    log_msg("DEBUG %s: presents/s=%llu (total=%llu)",
+    // presents/s counts grid slots under grid pacing (skipped=slots no frame came for);
+    // read = wakeup -> frame copied + pushed, which the frame handoff waits on.
+    const guint64 w = st.dbg_wakeups;
+    log_msg("DEBUG %s: presents/s=%llu frames=%llu skipped=%llu read avg/max=%.1f/%.1fms (total=%llu)",
             st.present_locked ? "present-locked" : "timer-fallback",
-            (unsigned long long)d, (unsigned long long)st.present_signals);
+            (unsigned long long)d, (unsigned long long)w, (unsigned long long)(d > w ? d - w : 0),
+            w ? (double)st.dbg_read_us_sum / (double)w / 1000.0 : 0.0, (double)st.dbg_read_us_max / 1000.0,
+            (unsigned long long)st.present_signals);
+    st.dbg_wakeups = 0;
+    st.dbg_read_us_sum = 0;
+    st.dbg_read_us_max = 0;
+    if (st.fixed_ts && st.pts_frames > 0) {
+        // Game time (presents/fps) vs wall-clock over the same frames. Negative =
+        // render fell behind the pacing grid (a stall the layer couldn't catch up).
+        // The clip renderer retimes the audio by the final figures (timing file).
+        gint64 video_ms = (gint64)((st.pts_last - st.pts_first) / GST_MSECOND) + 1000 / st.fps;
+        gint64 wall_ms  = (gint64)((st.pts_last_rt - st.pts_first_rt) / GST_MSECOND) + 1000 / st.fps;
+        log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
+                "ms drift=%+" G_GINT64_FORMAT "ms",
+                (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
+    }
     return G_SOURCE_CONTINUE;
 }
 
@@ -632,21 +932,43 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
             break;
         }
         if (st.nfd < 1 || st.fds[0] < 0) break;
-        if (st.zerocopy) {
-            // Zero-copy can't cheaply GPU-flip a dmabuf. If the layer reports a
-            // flipped (bottom-up) image, drop back to the host-map copy path (which
-            // flips per-row): clear zerocopy, re-request map_host=1, and wait for
-            // the layer to reinit + resend a host-mappable texture.
-            if (st.flip) {
-                log_msg("WARN: layer reports flipped image — zero-copy can't GPU-flip; reverting to host-map copy");
-                st.zerocopy = false;
-                st.caps_set = false;
+        // Frame-count PTS needs the layer's exact pacing: engage it only when the
+        // layer echoes the rate we asked for (older layers send 0). Decided before
+        // recording starts, then held for the whole capture.
+        if (st.frame_ack && st.ack_fd >= 0) {
+            // Once per texture (i.e. per swapchain), so the log shows which way it went.
+            st.handoff = td->frame_ack != 0;
+            log_msg(st.handoff ? "frame handoff ENGAGED (poke after the GPU copy lands; layer waits for our read)"
+                               : "WARN: layer has no frame handoff (image predates it?) — reads can race the GPU copy");
+        }
+        if (st.frame_pts && !st.playing) {
+            const bool paced = st.pace_fps > 0 && td->pace_fps == st.pace_fps
+                               && (!st.pace_skip || td->pace_skip);
+            if (paced != st.fixed_ts) {
+                st.fixed_ts = paced;
+                g_object_set(st.appsrc, "do-timestamp", paced ? FALSE : TRUE, NULL);
+            }
+            if (paced)
+                log_msg("%s ENGAGED (layer paces at %dfps; frame-count PTS)",
+                        st.pace_skip ? "grid pacing" : "fixed timestep", st.pace_fps);
+            else
+                log_msg("WARN: layer didn't confirm %dfps%s pacing (got %dfps%s) — wall-clock PTS",
+                        st.pace_fps, st.pace_skip ? " grid" : "", td->pace_fps,
+                        st.pace_skip && !td->pace_skip ? ", no grid support" : "");
+        }
+        if (st.zerocopy && st.cuda_import) {
+            if (!cuda_import_texture(td)) {
+                // Ask for the host-mapped image instead and upload from it; the layer
+                // reinits and resends the texture.
+                log_msg("WARN: zero-copy import unavailable — switching to the host-mapped image + CUDA upload");
+                st.cuda_import = false;
+                release_frame();
                 send_control(fd, true);
                 break;
             }
-            // Device-local dmabuf: no host map — push_one_frame wraps the fd directly.
             st.have_frame = true;
-            log_msg("shared dmabuf ready (zero-copy): %dx%d, pushing at %dfps", st.width, st.height, st.fps);
+            log_msg("zero-copy ENGAGED: shared image imported into CUDA (%dx%d, %llu bytes), GPU-to-GPU copies at %dfps",
+                    st.width, st.height, (unsigned long long)td->mem_size, st.fps);
         } else {
             // host-map copy path: mmap the shared image so push_one_frame can sample it.
             st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
@@ -698,17 +1020,42 @@ static gboolean on_listen(gint fd, GIOCondition cond, gpointer user)
 }
 
 // ---- shutdown -------------------------------------------------------------
+// EOS for every source but appsrc, sent off the main loop. When the muxer is waiting
+// on video, a live audio source sits blocked on a full queue holding its stream lock,
+// and gst_element_send_event blocks until that clears; on the main loop that wedged
+// everything (no EOS reached the video, the backstop timer never ran). appsrc's own
+// EOS lets the muxer drain the audio, which unblocks the source and this thread.
+static gpointer send_eos_to_other_sources(gpointer pipeline)
+{
+    GstIterator *it = gst_bin_iterate_sources(GST_BIN(pipeline));
+    GValue v = G_VALUE_INIT;
+    while (gst_iterator_next(it, &v) == GST_ITERATOR_OK) {
+        GstElement *src = g_value_get_object(&v);
+        if (src != GST_ELEMENT(st.appsrc))
+            gst_element_send_event(src, gst_event_new_eos());
+        g_value_reset(&v);
+    }
+    g_value_unset(&v);
+    gst_iterator_free(it);
+    gst_object_unref(pipeline);
+    return NULL;
+}
+
 static gboolean on_sigint(gpointer user)
 {
     (void)user;
     log_msg("SIGINT — sending EOS and finalizing");
     if (st.tick_src)    { g_source_remove(st.tick_src);    st.tick_src = 0; }
     if (st.present_src) { g_source_remove(st.present_src); st.present_src = 0; }
+    // No more reads: closing our ack end tells the layer to stop waiting on us now,
+    // instead of timing out on every present until it notices the disconnect.
+    if (st.ack_fd >= 0) { close(st.ack_fd); st.ack_fd = -1; st.handoff = false; }
     if (st.pipeline && st.playing) {
         // EOS the WHOLE pipeline (same as `gst-launch -e`) so BOTH the video appsrc
         // and the audio pulsesrc branch drain into qtmux and the moov atom is
         // written — EOS-ing only appsrc would leave audio open and truncate the mp4.
-        gst_element_send_event(st.pipeline, gst_event_new_eos());
+        gst_app_src_end_of_stream(st.appsrc);   // queued behind the frames; never blocks
+        g_thread_unref(g_thread_new("vkcap-eos", send_eos_to_other_sources, gst_object_ref(st.pipeline)));
         // backstop in case EOS never reaches the bus (the EOS bus handler quits too)
         g_timeout_add(5000, (GSourceFunc)g_main_loop_quit, st.loop);
     } else {
@@ -783,15 +1130,20 @@ int main(int argc, char **argv)
     st.fps = getenv("VKCAP_FPS") ? atoi(getenv("VKCAP_FPS")) : 60;
     if (st.fps <= 0) st.fps = 60;
     st.debug = getenv("VKCAP_DEBUG") && atoi(getenv("VKCAP_DEBUG")) != 0;
-    // Zero-copy defaults ON; only an explicit VKCAP_ZEROCOPY=0 disables it. (The
-    // shell always exports an explicit value; this default is for bare manual runs.)
-    { const char *z = getenv("VKCAP_ZEROCOPY"); st.zerocopy = !z || atoi(z) != 0; }
+    // Zero-copy is opt-in (VKCAP_ZEROCOPY=1).
+    { const char *z = getenv("VKCAP_ZEROCOPY"); st.zerocopy = z && atoi(z) != 0; }
     // Black-frame hold defaults ON (host-map/composite path only — needs pixel
     // access; the zero-copy clip path doesn't read pixels). VKCAP_BLACK_HOLD=0 off.
     { const char *z = getenv("VKCAP_BLACK_HOLD"); st.hold_black = !z || atoi(z) != 0; }
     { const char *p = getenv("VKCAP_READY_FILE"); st.ready_path = (p && *p) ? (char *)p : NULL; }
     { const char *p = getenv("VKCAP_START_FILE"); st.start_path = (p && *p) ? (char *)p : NULL; }
     { const char *t = getenv("VKCAP_START_TIMEOUT_MS"); st.start_timeout_ms = t ? atoi(t) : 10000; }
+    st.frame_pts = getenv("VKCAP_FRAME_PTS") && atoi(getenv("VKCAP_FRAME_PTS")) != 0;
+    st.pace_fps  = getenv("VKCAP_PACE_FPS") ? atoi(getenv("VKCAP_PACE_FPS")) : 0;
+    st.pace_skip = getenv("VKCAP_PACE_SKIP") && atoi(getenv("VKCAP_PACE_SKIP")) != 0;
+    { const char *p = getenv("VKCAP_TIMING_FILE"); st.timing_path = (p && *p) ? p : NULL; }
+    st.frame_ack = getenv("VKCAP_FRAME_ACK") && atoi(getenv("VKCAP_FRAME_ACK")) != 0;
+    st.ack_fd = st.ack_peer = -1;
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -801,14 +1153,9 @@ int main(int argc, char **argv)
             return 2;
         }
         gst_init(&argc, &argv);
-        if (st.zerocopy) {
-            st.dmabuf_alloc = gst_dmabuf_allocator_new();
-            if (!st.dmabuf_alloc) {
-                log_msg("WARN: gst_dmabuf_allocator_new failed — disabling zero-copy (host-map copy)");
-                st.zerocopy = false;
-            } else {
-                log_msg("zero-copy ENABLED (device-local dmabuf import; CPU never touches pixels)");
-            }
+        if (st.zerocopy && !cuda_init()) {
+            log_msg("WARN: zero-copy unavailable — host-map copy");
+            st.zerocopy = false;
         }
         GError *err = NULL;
         // FATAL_ERRORS: a missing element must fail here so the shell falls back to
@@ -818,8 +1165,34 @@ int main(int argc, char **argv)
         GstElement *src = gst_bin_get_by_name(GST_BIN(st.pipeline), "vksrc");
         if (!src) { log_msg("pipeline has no element named 'vksrc'"); return 2; }
         st.appsrc = GST_APP_SRC(src);
+        // The shell tags the source capsfilter (vkcaps) with memory:CUDAMemory when it
+        // asks for zero-copy: share our CUDA context with the pipeline's CUDA
+        // elements, or, without CUDA, drop the feature so cudaupload uploads as before.
+        if (st.zerocopy) {
+            GstContext *ctx = gst_context_new_cuda_context(st.cuda_ctx);
+            gst_element_set_context(st.pipeline, ctx);
+            gst_context_unref(ctx);
+        } else {
+            GstElement *vkcaps = gst_bin_get_by_name(GST_BIN(st.pipeline), "vkcaps");
+            if (vkcaps) {
+                GstCaps *caps = NULL;
+                g_object_get(vkcaps, "caps", &caps, NULL);
+                if (caps) {
+                    caps = gst_caps_make_writable(caps);
+                    for (guint i = 0; i < gst_caps_get_size(caps); i++)
+                        gst_caps_set_features(caps, i, NULL);   // system memory
+                    g_object_set(vkcaps, "caps", caps, NULL);
+                    gst_caps_unref(caps);
+                }
+                gst_object_unref(vkcaps);
+            }
+        }
         gst_app_src_set_stream_type(st.appsrc, GST_APP_STREAM_TYPE_STREAM);
+        // do-timestamp stays on until the layer confirms pacing (see the texture handler).
         g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", TRUE, NULL);
+        if (st.frame_pts || st.pace_fps > 0)
+            log_msg("%s requested: frame-pts=%d pace=%dfps", st.pace_skip ? "grid pacing" : "fixed timestep",
+                    st.frame_pts, st.pace_fps);
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);
@@ -865,6 +1238,15 @@ int main(int argc, char **argv)
             log_msg("WARN: eventfd failed (%s) — present-lock off, fps timer only", strerror(errno));
         else
             st.present_src = g_unix_fd_add(st.present_efd, G_IO_IN | G_IO_ERR, on_present_signal, NULL);
+        if (st.frame_ack && st.present_efd >= 0) {
+            int sv[2];
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) == 0) {
+                st.ack_fd = sv[0];
+                st.ack_peer = sv[1];
+            } else {
+                log_msg("WARN: ack socketpair failed (%s) — no frame handoff", strerror(errno));
+            }
+        }
 
         guint interval_ms = (guint)(1000 / st.fps);
         if (interval_ms < 1) interval_ms = 1;   // clamp: absurd VKCAP_FPS -> 0 -> busy loop
@@ -883,17 +1265,37 @@ int main(int argc, char **argv)
     g_main_loop_run(st.loop);
 
     // teardown
+    if (st.timing_path && st.fixed_ts && st.pts_frames > 0) {
+        // Video (game) span vs the wall-clock span the same frames took: the clip
+        // renderer stretches the pulsesrc audio by wall/video so the two line up.
+        FILE *f = fopen(st.timing_path, "w");
+        if (f) {
+            const GstClockTime frame = gst_util_uint64_scale(1, GST_SECOND, st.fps);
+            fprintf(f, "frames=%llu fps=%d video_ns=%llu wall_ns=%llu reanchors=%llu\n",
+                    (unsigned long long)st.pts_frames, st.fps,
+                    (unsigned long long)(st.pts_last - st.pts_first + frame),
+                    (unsigned long long)(st.pts_last_rt - st.pts_first_rt + frame),
+                    (unsigned long long)st.pts_reanchors);
+            fclose(f);
+        }
+    }
     if (st.last_buf) gst_buffer_unref(st.last_buf);
-    if (st.dmabuf_alloc) gst_object_unref(st.dmabuf_alloc);
     if (st.hud_pad) gst_object_unref(st.hud_pad);
     g_free(st.hud_ctl_path);
     if (st.pipeline) {
+        // A streaming thread that's still stuck must not hang the process: the shell
+        // waits on our exit before it can probe (or retry) the segment.
+        alarm(5);
         gst_element_set_state(st.pipeline, GST_STATE_NULL);
         gst_object_unref(st.pipeline);
     }
     release_frame();
+    if (st.cuda_pool) { gst_buffer_pool_set_active(st.cuda_pool, FALSE); gst_object_unref(st.cuda_pool); }
+    if (st.cuda_ctx) gst_object_unref(st.cuda_ctx);
     if (st.present_src) g_source_remove(st.present_src);
     if (st.present_efd >= 0) close(st.present_efd);
+    if (st.ack_fd >= 0) close(st.ack_fd);
+    if (st.ack_peer >= 0) close(st.ack_peer);
     if (st.client_fd >= 0) close(st.client_fd);
     if (st.listen_fd >= 0) close(st.listen_fd);
     log_msg("exit");
