@@ -211,6 +211,8 @@ position_hud_overlay() {
       stop_hud; sleep 1
       start_hud
       wait_for_hud_server 30 || warn "respawned hud-manager not responding"
+      # A respawned HUD starts unpinned (on every core, capture cores included).
+      declare -F pin_aux_procs >/dev/null 2>&1 && pin_aux_procs
     fi
     sleep 1
   done

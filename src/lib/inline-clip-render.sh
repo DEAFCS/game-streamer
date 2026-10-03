@@ -207,7 +207,8 @@ set_fixed_timestep() {
   local fps="$1"
   if [ "$fps" = "0" ]; then
     [ "$FIXED_TIMESTEP_ON" = "1" ] || return 0
-    spec_post /demo/exec '{"cmd": "host_framerate 0"}'
+    # sv_cheats was only turned on for host_framerate; don't leave it on in the session.
+    spec_post /demo/exec '{"cmd": "host_framerate 0; sv_cheats 0"}'
     FIXED_TIMESTEP_ON=0
   else
     # First enable of the job also queries the cvar (bare name), so the console echo
@@ -706,17 +707,73 @@ H264_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
   -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle
   -pix_fmt yuv420p -profile:v high -level 4.2)
 # True when ffmpeg can encode with these args on this node (driver, GPU, options).
+# Bounded: a wedged driver must not hang the batch before STEP 1.
 ffmpeg_venc_ok() {
-  ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 \
+  timeout 20 ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 \
     -frames:v 8 "$@" -f null - >/dev/null 2>&1
 }
-if [ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && ffmpeg_venc_ok "${H264_NVENC_ARGS[@]}"; then
+# Which NVENC variant works on this node: "full", "nobref" (pre-Turing GPUs reject
+# B-frames as references), or none. Each job is its own process, so the answer is
+# kept in the pod's probe cache; only a working variant is cached (a failure may be
+# transient).
+_final_nvenc_pick() {
+  _probe_cache_load GS_FINAL_NVENC && { printf '%s' "$GS_FINAL_NVENC"; return 0; }
+  local nobref=() a skip=0
+  for a in "${H264_NVENC_ARGS[@]}"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    [ "$a" = "-b_ref_mode" ] && { skip=1; continue; }
+    nobref+=("$a")
+  done
+  if ffmpeg_venc_ok "${H264_NVENC_ARGS[@]}"; then GS_FINAL_NVENC=full
+  elif ffmpeg_venc_ok "${nobref[@]}"; then GS_FINAL_NVENC=nobref
+  else return 1
+  fi
+  export GS_FINAL_NVENC; _probe_cache_store GS_FINAL_NVENC
+  printf '%s' "$GS_FINAL_NVENC"
+}
+FINAL_NVENC=""
+[ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && FINAL_NVENC=$(_final_nvenc_pick || true)
+if [ "$FINAL_NVENC" = "nobref" ]; then
+  _a=(); _skip=0
+  for _x in "${H264_NVENC_ARGS[@]}"; do
+    if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+    [ "$_x" = "-b_ref_mode" ] && { _skip=1; continue; }
+    _a+=("$_x")
+  done
+  H264_NVENC_ARGS=("${_a[@]}"); unset _a _skip _x
+fi
+if [ -n "$FINAL_NVENC" ]; then
   H264_VENC_ARGS=("${H264_NVENC_ARGS[@]}")
-  say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})"
+  say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})$([ "$FINAL_NVENC" = nobref ] && echo ', no B-frame refs')"
 else
   H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
   say "final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
 fi
+
+# ffmpeg with the final encoder args (passed in-line as "${FFMPEG_VENC_ARGS[@]}"). If an
+# NVENC encode fails mid-job (session limit, driver hiccup), switch this process to
+# libx264 and run the same command again, instead of failing the clip.
+# FFMPEG_NICE=<n> runs it under nice.
+ffmpeg_venc() {
+  local pre=() ; [ -n "${FFMPEG_NICE:-}" ] && pre=(nice -n "$FFMPEG_NICE")
+  "${pre[@]}" ffmpeg "$@" && return 0
+  [ "${FFMPEG_VENC_ARGS[1]:-}" = "h264_nvenc" ] || return 1
+  local args=("$@") n=${#FFMPEG_VENC_ARGS[@]} i j match out=()
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    match=1
+    for ((j = 0; j < n; j++)); do
+      [ "${args[i+j]:-}" = "${FFMPEG_VENC_ARGS[j]}" ] || { match=0; break; }
+    done
+    if [ "$match" = 1 ]; then
+      out+=("${H264_X264_ARGS[@]}"); i=$((i + n - 1))
+    else
+      out+=("${args[i]}")
+    fi
+  done
+  say "WARN final encode: h264_nvenc failed — retrying with libx264"
+  FFMPEG_VENC_ARGS=("${H264_X264_ARGS[@]}")
+  "${pre[@]}" ffmpeg "${out[@]}"
+}
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
     GST_H265_OK=0
@@ -980,6 +1037,21 @@ CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 
+OUTRO_CACHE_DIR="${OUTRO_CACHE_DIR:-$CLIP_OUT_DIR/.outro-cache}"
+
+# Cache path for the encoder-matched outro, keyed on everything that changes its
+# bytes — source file identity, encoder args, fps — so a codec/tier switch on a
+# later clip can never reuse a mismatched file.
+matched_outro_cache_path() {
+  mkdir -p "$OUTRO_CACHE_DIR" || return 1
+  local stamp key
+  stamp=$(stat -c '%s:%Y' "$OUTRO_FILE" 2>/dev/null || echo '?')
+  key=$(printf '%s|%s|%s|%s' \
+          "$OUTRO_FILE" "$stamp" "${FFMPEG_VENC_ARGS[*]}" "${CLIP_OUTPUT_FPS:-60}" \
+        | md5sum | cut -c1-12)
+  printf '%s/outro-%s.mp4\n' "$OUTRO_CACHE_DIR" "$key"
+}
+
 # Precompute: will an outro be appended at concat time? If yes AND we
 # would have run a per-segment chip-overlay pass, we can fuse both into
 # a single ffmpeg encode at the end â€” eliminating
@@ -1139,7 +1211,19 @@ warm_pipelines_if_cold() {
   fi
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1
-  local wait_ms=$(( dur_ms / rate + 2000 ))   # cover the range at $rate + compile-spike margin
+  # Demo time to play: the range plus a margin for compile stalls (2s of wall time at
+  # $rate). Never past the match-end guard: running into gameover here, uncaptured,
+  # makes cs2 close the demo and fails this job and every later one in the batch.
+  local play_ms=$(( dur_ms + 2000 * rate )) tick_rate="${CLIP_TICK_RATE:-64}"
+  if [ -n "${DEMO_TOTAL_TICKS_FOR_GUARD:-}" ] && [ "${DEMO_TOTAL_TICKS_FOR_GUARD:-0}" -gt 0 ]; then
+    local room_ms=$(( (DEMO_TOTAL_TICKS_FOR_GUARD - ${MATCH_END_GUARD_TICKS:-0} - start) * 1000 / tick_rate ))
+    if [ "$room_ms" -lt 1000 ]; then
+      say "WARM-UP: skipped — ticks ${start}-${end} are within the match-end guard"
+      return 0
+    fi
+    [ "$play_ms" -gt "$room_ms" ] && play_ms=$room_ms
+  fi
+  local wait_ms=$(( play_ms / rate ))
   # In-world warm only: fast-forward the range so the in-world pipelines (map,
   # effects) compile before the real capture clears the cold opening. We do NOT
   # POV-lock for the first-person viewmodel: deferring the chip render off the
@@ -1151,7 +1235,8 @@ warm_pipelines_if_cold() {
   spec_post /demo/seek   "{\"tick\": ${start}}"
   # /demo/seek only queues the gototick, and from a pause it lands paused: a toggle
   # sent before it lands gets undone, so the range never played (nothing warmed).
-  wait_seek_settled "WARM-UP seek" || true
+  local settled=1
+  wait_seek_settled "WARM-UP seek" || settled=0
   spec_post /demo/speed  "{\"rate\": ${rate}}"
   spec_post /demo/toggle '{}'                  # play through the range fast
   sleep "$(awk -v ms="$wait_ms" 'BEGIN{printf "%.2f", ms/1000}')"
@@ -1160,9 +1245,15 @@ warm_pipelines_if_cold() {
   warmup_wait_compile
   # No seek back: STEP 3 seeks to the segment's pre-roll next anyway, and a seek to
   # the tick cs2 is already parked on never shows a GSI change, so it can't settle.
-  mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
-  echo "$start $end" >> "$WARM_MARKER"
-  say "WARM-UP: done — ticks ${start}-${end} warmed"
+  # Only record the range if the seek landed: a toggle sent before it lands is undone,
+  # so nothing played and the next segment over this range should warm it again.
+  if [ "$settled" = 1 ]; then
+    mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
+    echo "$start $end" >> "$WARM_MARKER"
+    say "WARM-UP: done — ticks ${start}-${end} warmed"
+  else
+    say "WARM-UP: seek never settled — ticks ${start}-${end} not marked warm"
+  fi
 }
 
 # Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
@@ -1586,7 +1677,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
           AUDIO_ARGS=(-an)
         fi
 
-        if ! nice -n 10 ffmpeg -y -hide_banner -loglevel warning \
+        if ! FFMPEG_NICE=10 ffmpeg_venc -y -hide_banner -loglevel warning \
              "${INPUT_ARGS[@]}" \
              -filter_complex "$FC_VIDEO" \
              -map "[vout]" \
@@ -1748,25 +1839,34 @@ try_concat_copy() {
   [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] || return 1
   [ "$COPY_ELIGIBLE" = "1" ] || return 1
 
-  local outro_matched="$SEG_DIR/outro-matched.mp4"
-  local in_args=(-i "$OUTRO_FILE")
-  local map_args=(-map 0:v -map 0:a)
-  if ! has_audio_stream "$OUTRO_FILE"; then
-    in_args+=(-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000)
-    map_args=(-map 0:v -map 1:a -shortest)
-  fi
-  say "STEP 9: concat fast path â€” transcoding outro to match polished segments"
-  if ! ffmpeg -y -hide_banner -loglevel warning \
-       "${in_args[@]}" \
-       "${map_args[@]}" \
-       "${FFMPEG_VENC_ARGS[@]}" \
-       -r "${CLIP_OUTPUT_FPS:-60}" \
-       -c:a aac -b:a 192k -ar 48000 -ac 2 \
-       -movflags +faststart \
-       "$outro_matched"; then
-    say "  concat: outro transcode failed â€” falling back to re-encode"
-    rm -f "$outro_matched"
-    return 1
+  local outro_matched
+  outro_matched=$(matched_outro_cache_path) || return 1
+  if [ -s "$outro_matched" ]; then
+    say "STEP 9: concat fast path — reusing cached matched outro"
+  else
+    local in_args=(-i "$OUTRO_FILE")
+    local map_args=(-map 0:v -map 0:a)
+    if ! has_audio_stream "$OUTRO_FILE"; then
+      in_args+=(-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000)
+      map_args=(-map 0:v -map 1:a -shortest)
+    fi
+    say "STEP 9: concat fast path — transcoding outro to match polished segments (cached for later clips)"
+    # Transcode to a scratch file and rename in — a killed render must never
+    # leave a truncated outro behind for the next clip to concat.
+    local staging="${outro_matched}.$$.tmp"
+    if ! ffmpeg_venc -y -hide_banner -loglevel warning \
+         "${in_args[@]}" \
+         "${map_args[@]}" \
+         "${FFMPEG_VENC_ARGS[@]}" \
+         -r "${CLIP_OUTPUT_FPS:-60}" \
+         -c:a aac -b:a 192k -ar 48000 -ac 2 \
+         -movflags +faststart \
+         "$staging"; then
+      say "  concat: outro transcode failed — falling back to re-encode"
+      rm -f "$staging"
+      return 1
+    fi
+    mv -f "$staging" "$outro_matched" || { rm -f "$staging"; return 1; }
   fi
 
   local copy_list="$SEG_DIR/concat-copy.txt"
@@ -1860,7 +1960,7 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
     FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
   fi
 
-  if ! ffmpeg -y -hide_banner -loglevel warning \
+  if ! ffmpeg_venc -y -hide_banner -loglevel warning \
        "${CONCAT_INPUTS[@]}" \
        -filter_complex "$FC" \
        -map "[v]" -map "[a]" \
@@ -1881,8 +1981,8 @@ else
     say "  concat: stream-copy succeeded"
   else
     rm -f "$CLIP_OUT_FILE"
-    say "  concat: stream-copy refused â€” re-encoding"
-    if ! ffmpeg -y -hide_banner -loglevel warning \
+    say "  concat: stream-copy refused — re-encoding"
+    if ! ffmpeg_venc -y -hide_banner -loglevel warning \
          -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
          "${FFMPEG_VENC_ARGS[@]}" \
          -r "${CLIP_OUTPUT_FPS:-60}" \

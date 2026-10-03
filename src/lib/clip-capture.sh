@@ -62,7 +62,8 @@ _clip_resolve_encoder() {
     *) warn "CLIP_VIDEO_CODEC=$CLIP_CODEC unrecognized â€” using h264" ;;
   esac
   CLIP_CODEC=h264
-  CLIP_ENC=$(pick_h264_pipeline "$gop" "$kbps" clip)
+  CLIP_ENC=$(pick_h264_pipeline "$gop" "$kbps" clip) \
+    || { warn "no H.264 encoder resolved"; return 1; }
   CLIP_PARSE_CAPS="h264parse config-interval=1"
 }
 
@@ -102,7 +103,7 @@ _start_clip_capture_vkcapture() {
   rm -f "$CLIP_CAPTURE_START_FILE"
   export VKCAP_START_FILE="$CLIP_CAPTURE_START_FILE"
 
-  _clip_resolve_encoder "$gop" "$kbps"
+  _clip_resolve_encoder "$gop" "$kbps" || return 1
   local codec="$CLIP_CODEC" enc="$CLIP_ENC" parse_caps="$CLIP_PARSE_CAPS"
 
   local convert
@@ -243,7 +244,7 @@ _start_clip_capture_gst() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  _clip_resolve_encoder "$gop" "$kbps"
+  _clip_resolve_encoder "$gop" "$kbps" || return 1
   local codec="$CLIP_CODEC" enc="$CLIP_ENC" parse_caps="$CLIP_PARSE_CAPS"
 
   log "  clip capture: $out_file (${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"

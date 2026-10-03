@@ -108,7 +108,8 @@ start_capture() {
       ;;
   esac
   if [ "$codec" = "h264" ]; then
-    enc=$(pick_h264_pipeline "$gop" "$kbps" live)
+    enc=$(pick_h264_pipeline "$gop" "$kbps" live) \
+      || { warn "no H.264 encoder resolved — not starting capture"; return 1; }
     parse="h264parse config-interval=1"
   fi
   log "  codec: $codec"
@@ -169,12 +170,17 @@ start_capture() {
     why="cs2 not running"
   elif ! command -v find_hud_overlay_window >/dev/null 2>&1; then
     why="no HUD support loaded"
+  elif declare -F hud_running >/dev/null 2>&1 && ! hud_running; then
+    # Only wait for a window that can appear: with the HUD off or dead, waiting made
+    # every restart_capture (SRT-drop recovery) 10s longer.
+    why="HUD not running"
   else
-    local waited=0
+    local waited=0 wait_max="${HUD_COMPOSITE_WAIT_S:-10}"
+    wait_max="${wait_max//[!0-9]/}"; wait_max="${wait_max:-10}"
     while :; do
       hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
       [ -n "$hud_xid" ] && break
-      [ "$waited" -ge "${HUD_COMPOSITE_WAIT_S:-10}" ] && { why="HUD overlay window not found after ${waited}s"; break; }
+      [ "$waited" -ge "$wait_max" ] && { why="HUD overlay window not found after ${waited}s"; break; }
       sleep 1; waited=$((waited + 1))
     done
     [ -n "$hud_xid" ] && [ "$waited" -gt 0 ] && log "  composite: HUD overlay window appeared after ${waited}s"

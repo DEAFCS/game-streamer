@@ -1,5 +1,5 @@
 diff --git a/src/capture.c b/src/capture.c
-index 247c04b..573d140 100644
+index 247c04b..4a0539b 100644
 --- a/src/capture.c
 +++ b/src/capture.c
 @@ -28,6 +28,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
@@ -55,7 +55,7 @@ index 247c04b..573d140 100644
          return;
      }
      last_check = now;
-@@ -134,21 +158,80 @@ void capture_update_socket()
+@@ -134,21 +158,88 @@ void capture_update_socket()
      }
  
      struct capture_control_data control;
@@ -64,13 +64,34 @@ index 247c04b..573d140 100644
 +        .iov_base = &control,
 +        .iov_len = sizeof(control),
 +    };
-+    char cmsg_buf[CMSG_SPACE(sizeof(int) * 2)];
++    // Aligned for cmsghdr; MSG_CMSG_CLOEXEC so the fds don't leak into anything cs2
++    // spawns. Fds are taken out before the size check so a short message can't leak them.
++    union {
++        char buf[CMSG_SPACE(sizeof(int) * 2)];
++        struct cmsghdr align;
++    } cmsg_u;
 +    struct msghdr msg = {0};
 +    msg.msg_iov = &io;
 +    msg.msg_iovlen = 1;
-+    msg.msg_control = cmsg_buf;
-+    msg.msg_controllen = sizeof(cmsg_buf);
-+    ssize_t n = recvmsg(data.connfd, &msg, 0);
++    msg.msg_control = cmsg_u.buf;
++    msg.msg_controllen = sizeof(cmsg_u.buf);
++    ssize_t n = recvmsg(data.connfd, &msg, MSG_CMSG_CLOEXEC);
++    int fds[2] = {-1, -1};
++    int nfds = 0;
++    if (n > 0) {
++        for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
++                cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++                int got = (int)((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int));
++                int all[2] = {-1, -1};
++                memcpy(all, CMSG_DATA(cmsg), sizeof(int) * (got > 2 ? 2 : got));
++                nfds = got > 2 ? 2 : got;
++                fds[0] = all[0];
++                fds[1] = all[1];
++                break;
++            }
++        }
++    }
      if (n == sizeof(control)) {
          const bool old_no_modifiers = data.no_modifiers;
          const bool old_linear = data.linear;
@@ -98,20 +119,7 @@ index 247c04b..573d140 100644
 +        }
 +        // The consumer may hand us (SCM_RIGHTS) an eventfd to poke on every
 +        // present (want_present_signal) and, after it, a socket it reports
-+        // finished reads on (want_frame_ack). Any fd we don't take is closed.
-+        int fds[2] = {-1, -1};
-+        int nfds = 0;
-+        for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
-+                cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-+                nfds = (int)((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int));
-+                if (nfds > 2) {
-+                    nfds = 2;
-+                }
-+                memcpy(fds, CMSG_DATA(cmsg), sizeof(int) * nfds);
-+                break;
-+            }
-+        }
++        // finished reads on (want_frame_ack). Any fd we don't take is closed below.
 +        if (control.want_present_signal && nfds >= 1) {
 +            if (data.present_eventfd >= 0) {
 +                close(data.present_eventfd);
@@ -130,15 +138,15 @@ index 247c04b..573d140 100644
 +            data.pokes_sent = 0;
 +            data.pokes_acked = 0;
 +        }
-+        for (int i = 0; i < 2; i++) {
-+            if (fds[i] >= 0) {
-+                close(fds[i]);
-+            }
++    }
++    for (int i = 0; i < 2; i++) {
++        if (fds[i] >= 0) {
++            close(fds[i]);
 +        }
      }
      if (n == -1) {
          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-@@ -162,7 +245,221 @@ void capture_update_socket()
+@@ -162,7 +253,221 @@ void capture_update_socket()
          close(data.connfd);
          data.connfd = -1;
          data.accepted = false;
@@ -164,7 +172,7 @@ index 247c04b..573d140 100644
 +{
 +    if (data.present_eventfd < 0) {
 +        return;
-     }
++    }
 +    ssize_t r = write(data.present_eventfd, &slots, sizeof(slots));
 +    if (r == sizeof(slots)) {
 +        data.pokes_sent += slots;
@@ -304,7 +312,7 @@ index 247c04b..573d140 100644
 +        pthread_mutex_lock(&handoff.mutex);
 +        handoff.pending = false;
 +        pthread_cond_broadcast(&handoff.cond);
-+    }
+     }
 +    return NULL;
 +}
 +
@@ -360,7 +368,7 @@ index 247c04b..573d140 100644
  }
  
  void capture_init_shtex(
-@@ -182,6 +479,13 @@ void capture_init_shtex(
+@@ -182,6 +487,13 @@ void capture_init_shtex(
      td.winid = winid;
      td.flip = flip;
      td.color_space = color_space;
@@ -374,7 +382,7 @@ index 247c04b..573d140 100644
  
      struct msghdr msg = {0};
  
-@@ -245,6 +549,19 @@ bool capture_allocate_map_host()
+@@ -245,6 +557,19 @@ bool capture_allocate_map_host()
      return data.map_host;
  }
  

@@ -212,6 +212,11 @@ pick_h264_pipeline() {
       printf 'x264enc tune=zerolatency speed-preset=veryfast bitrate=%s key-int-max=%s' \
         "$kbps" "$gop"
       ;;
+    *)
+      # Nothing resolved: fail here rather than hand back an empty encoder, which
+      # turns the pipeline into "! !" and dies at parse time with a vaguer error.
+      return 1
+      ;;
   esac
 }
 
@@ -443,7 +448,9 @@ _cuda_scale_available() {
       GS_CUDASCALE_OK=0
     fi
     export GS_CUDASCALE_OK
-    _probe_cache_store GS_CUDASCALE_OK
+    # Only cache a success: one transient gst-inspect/CUDA failure must not pin the
+    # pod to CPU scaling for its whole life.
+    [ "$GS_CUDASCALE_OK" = 1 ] && _probe_cache_store GS_CUDASCALE_OK
   fi
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
@@ -565,18 +572,27 @@ pin_pid_tree() {
 # included. Pin it — and, on streams, the HUD/spec-server/picom — once it's up.
 apply_cpu_split() {
   compute_cpu_split
-  local cs2 p n=0
+  local cs2
   cs2=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
   if [ -n "$cs2" ] && [ -n "$GS_CS2_CPUS" ]; then
     pin_pid_tree "$GS_CS2_CPUS" "$cs2"
     log "cpu split: cs2 (pid $cs2) -> cores $GS_CS2_CPUS"
   fi
-  if [ -n "$GS_AUX_CPUS" ]; then
-    for p in $(pgrep -f '[j]ts-hud-manager') $(pgrep -f '[s]pectator/server.mjs') $(pgrep -x picom); do
-      pin_pid_tree "$GS_AUX_CPUS" "$p"; n=$((n + 1))
-    done
-    log "cpu split: HUD/spec-server/picom ($n procs) -> cores $GS_AUX_CPUS; capture -> ${GS_CAPTURE_CPUS:-all}"
-  fi
+  pin_aux_procs
+}
+
+# Move the HUD (Electron) and picom onto the AUX core. Not spec-server: affinity is
+# inherited, and it starts on-demand clip renders (routes/render-clip.mjs) and
+# switch-match.sh, which would then capture, render the chip and encode on that one
+# core. Also called when the HUD respawns (position_hud_overlay).
+pin_aux_procs() {
+  compute_cpu_split
+  [ -n "$GS_AUX_CPUS" ] || return 0
+  local p n=0
+  for p in $(pgrep -f '[j]ts-hud-manager') $(pgrep -x picom); do
+    pin_pid_tree "$GS_AUX_CPUS" "$p"; n=$((n + 1))
+  done
+  log "cpu split: HUD/picom ($n procs) -> cores $GS_AUX_CPUS; capture -> ${GS_CAPTURE_CPUS:-all}"
 }
 
 # taskset prefix array for cs2: confines cs2 to GS_CS2_CPUS so it never shares a

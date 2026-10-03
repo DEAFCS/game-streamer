@@ -339,6 +339,11 @@ static void send_control(int fd, bool capturing)
         // drop pokes still queued from before so they can't count as reads.
         uint64_t stale;
         while (read(st.present_efd, &stale, sizeof(stale)) == sizeof(stale)) {}
+        // Same for acks we sent that no layer read (it gave up waiting, or cs2 exited):
+        // we still hold the peer end, so they'd sit in the socket and the next layer
+        // would read an old, large total as "everything acked" and never wait again.
+        if (st.ack_peer >= 0)
+            while (recv(st.ack_peer, &stale, sizeof(stale), MSG_DONTWAIT) > 0) {}
         st.ack_count = 0;
     }
 
@@ -788,7 +793,12 @@ static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
     if (took > st.dbg_read_us_max) st.dbg_read_us_max = took;
     // The frame is copied out (or deliberately skipped): release the shared image to
     // the layer's next copy. The running total makes a late ack harmless.
-    if (st.handoff && st.ack_fd >= 0) {
+    // Count every poke since the fds went out, even before the texture message has
+    // set st.handoff: the layer counts them all, so skipping one (the first poke can
+    // be handled before the texture message) left our total short for good and every
+    // later frame waited the layer's full 20ms ack timeout. Without frame_ack there is
+    // no ack socket (ack_fd < 0); an unpatched layer just never reads it.
+    if (st.ack_fd >= 0) {
         st.ack_count += cnt;
         ssize_t w = send(st.ack_fd, &st.ack_count, sizeof(st.ack_count), MSG_DONTWAIT | MSG_NOSIGNAL);
         (void)w;

@@ -211,8 +211,8 @@ advanced, so the consumer's frame count always equals wall time. That fixes the
 stamps can't drift behind the audio. The consumer's `DEBUG` line reports slots/s, frames,
 skipped slots and how long each frame took to read.
 
-Live and replay streams use the same pacing and the frame handoff on their cs2+HUD
-composite capture (`LIVE_PACE`, on by default). The frame handoff is opt-in there
+Live and replay streams use the same grid pacing on their cs2+HUD composite capture
+(`LIVE_PACE`, on by default). The frame handoff is opt-in there
 (`LIVE_FRAME_HANDOFF=1`): on a replay stream it skipped 5-20 frames a second during
 rounds, while the same demo recorded as clips skipped none.
 

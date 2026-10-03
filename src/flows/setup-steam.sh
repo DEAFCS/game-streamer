@@ -42,7 +42,9 @@ start_spec_server
 # adopts it. grep logs for "WATCH" for the URL.
 if [ "${DEBUG_STREAM:-0}" = "1" ]; then
   debug_sid="${DEBUG_STREAM_ID:-${MATCH_ID:-debug}}"
-  case "$CS2_DISPLAY_RES" in
+  # Bitrate follows the encoded size (LIVE_OUTPUT_DIMS), not the render size — same
+  # rule as run-live/run-demo, which adopt this stream.
+  case "${LIVE_OUTPUT_DIMS:-1920x1080}" in
     2560x1440) debug_kbps="${VIDEO_KBPS:-20000}" ;;
     *)         debug_kbps="${VIDEO_KBPS:-12000}" ;;
   esac

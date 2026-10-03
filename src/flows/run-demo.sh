@@ -51,6 +51,8 @@ start_status_reporter
 # Same for grid pacing (CLIP_PACE, on by default). Without either, launch at the clip rate.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -z "${CS2_FPS_MAX:-}" ]; then
   CS2_FPS_MAX=$(printf '%s' "${CLIP_BATCH_JOBS:-}" | node "$LIB_DIR/clip-helpers.mjs" jobs-fps)
+  # A failed or odd lookup must not double to 0, which is fps_max's "no cap".
+  case "$CS2_FPS_MAX" in ''|*[!0-9]*|0) CS2_FPS_MAX=60 ;; esac
   if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-1}" = "1" ]; then
     CS2_FPS_MAX=$(( CS2_FPS_MAX * 2 ))   # the layer paces; the cap is only headroom
   fi
