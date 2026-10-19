@@ -2,7 +2,7 @@
 import { createServer } from "node:http";
 import process from "node:process";
 
-import { BIND, DISPLAY, PORT } from "./env.mjs";
+import { BIND, DISPLAY, PORT, SPEC_SERVER_TOKEN } from "./env.mjs";
 import { dispatch } from "./routes/index.mjs";
 import { findCs2Window } from "./cs2/window.mjs";
 import { gsiState } from "./state/gsi.mjs";
@@ -13,6 +13,11 @@ const server = createServer((req, res) => { void dispatch(req, res); });
 
 server.listen(PORT, BIND, () => {
   process.stderr.write(`[spec-server] listening on ${BIND}:${PORT} (display=${DISPLAY})\n`);
+  if (!SPEC_SERVER_TOKEN) {
+    process.stderr.write(
+      "[spec-server] WARN: SPEC_SERVER_TOKEN is unset, so every route is open to anyone who can reach this port\n",
+    );
+  }
 });
 
 // No-op unless DEMO_SESSION_ID is set (batch pods have no watchers).

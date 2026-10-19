@@ -46,22 +46,10 @@ export async function reportDemoPlayingOnce() {
     // 500ms was tested and the demoui panel was still showing up in
     // captured clips — cs2 needs this full ~3s window between GSI's
     // first map-phase event and the panel being interactable.
-    setTimeout(async () => {
-      const ok = await execCfgCommand("demoui").catch(() => false);
-      if (ok) {
-        playingState.demouiHidden = true;
-        return;
-      }
-      process.stderr.write(
-        "[spec-server] demoui hide command failed to send — retrying once\n",
-      );
-      const retryOk = await execCfgCommand("demoui").catch(() => false);
-      if (!retryOk) {
-        process.stderr.write(
-          "[spec-server] demoui hide retry failed — proceeding anyway (cs2 not running?)\n",
-        );
-      }
-      playingState.demouiHidden = true;
+    setTimeout(() => {
+      void execCfgCommand("demoui")
+        .catch(() => undefined)
+        .finally(() => { playingState.demouiHidden = true; });
     }, DEMOUI_BLIND_TOGGLE_MS);
   }
 

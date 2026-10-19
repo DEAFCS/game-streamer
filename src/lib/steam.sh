@@ -368,6 +368,74 @@ update_cs2_via_steamcmd() {
   register_library "$STEAM_LIBRARY"
 }
 
+# Bring an existing CS2 install up to date via steamcmd BEFORE Steam
+# boots. Steam refuses -applaunch on an out-of-date app and its own
+# "CS2 must be updated" flow sometimes wedges, so updating here (Steam
+# off) means the client sees a current install and launches straight
+# away. No `validate` — that re-hashes ~57 GB; steamcmd's buildid check
+# is a fast no-op when current. Non-fatal on failure: warn and let
+# Steam's own updater try, i.e. the pre-existing behaviour.
+# CS2_UPDATE_ON_BOOT=0 restores the old skip-if-installed behaviour.
+update_cs2_via_steamcmd() {
+  local manifest="${1:?manifest path required}"
+
+  if [ "${CS2_UPDATE_ON_BOOT:-1}" != "1" ]; then
+    log "CS2_UPDATE_ON_BOOT=0 — skipping CS2 update check"
+    return 0
+  fi
+  if [ ! -x /opt/steamcmd/steamcmd.sh ]; then
+    warn "steamcmd missing — skipping CS2 update check (Steam will self-update)"
+    return 0
+  fi
+
+  local old_bid
+  old_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
+    | grep -oE '[0-9]+' | head -1 || true)
+  log "CS2 installed (buildid ${old_bid:-unknown}) — running steamcmd update check"
+
+  # steamcmd expects the manifest inside the install dir (we lift it to
+  # the library root post-install for Steam). Seed a copy so it sees the
+  # installed state and downloads only the delta — without it steamcmd
+  # treats the install as missing and redownloads everything.
+  mkdir -p "$CS2_DIR/steamapps"
+  cp -f "$manifest" "$CS2_DIR/steamapps/appmanifest_730.acf"
+
+  local steamcmd_log="$LOG_DIR/steamcmd-cs2-update.log"
+  : > "$steamcmd_log"
+  /opt/steamcmd/steamcmd.sh \
+    +@sSteamCmdForcePlatformType linux \
+    +force_install_dir "$CS2_DIR" \
+    +login "$STEAM_USER" "$STEAM_PASSWORD" \
+    +app_update 730 \
+    +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
+
+  if ! grep -qE "Success! App '730' (fully installed|already up to date)" "$steamcmd_log"; then
+    warn "steamcmd update pass did not confirm success — continuing; Steam will self-update if needed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
+    return 0
+  fi
+
+  # Lift the (possibly updated) manifest back to the library root, same
+  # as the fresh-install path.
+  if [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
+    mv -f "$CS2_DIR/steamapps/appmanifest_730.acf" "$manifest"
+    rmdir "$CS2_DIR/steamapps" 2>/dev/null || true
+    sed -i 's|"installdir"[[:space:]]*"[^"]*"|"installdir"\t\t"Counter-Strike Global Offensive"|' \
+      "$manifest"
+  fi
+
+  local new_bid
+  new_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
+    | grep -oE '[0-9]+' | head -1 || true)
+  if [ -n "$new_bid" ] && [ "$new_bid" != "$old_bid" ]; then
+    log "CS2 updated: buildid ${old_bid:-unknown} -> $new_bid"
+  else
+    log "CS2 already up to date (buildid ${new_bid:-${old_bid:-unknown}})"
+  fi
+
+  # steamcmd can rewrite libraryfolders.vdf — re-register ours (idempotent).
+  register_library "$STEAM_LIBRARY"
+}
+
 # Joins the last few non-empty lines with ` | ` for embedding in die().
 # Capped well under the api's 500-char error_message ceiling.
 _steamcmd_log_tail() {
@@ -1403,6 +1471,42 @@ kill_steam() {
   pkill -9 -x dbus-launch            2>/dev/null || true
   rm -f "$HOME/.steam/steam.pid" "$HOME/.steam/steam.pipe" 2>/dev/null || true
   rm -rf /tmp/dumps* /tmp/source_engine_*.lock /tmp/steam_pipe_* 2>/dev/null || true
+}
+
+# Summed RSS (kB) of every steamwebhelper process, 0 when none are up.
+steam_webhelper_rss_kb() {
+  local total=0 pid rss
+  for pid in $(pgrep -f steamwebhelper 2>/dev/null); do
+    rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    case "$rss" in ''|*[!0-9]*) continue ;; esac
+    total=$(( total + rss ))
+  done
+  printf '%s\n' "$total"
+}
+
+# steamwebhelper is Steam's CEF UI: ~1GB RSS across 8 processes, and every
+# dialog we drive through it (cloud-out-of-date, shader skip, Play) is done by
+# the time cs2 is up. Reap it once here; if Steam respawns it we leave it be
+# rather than fight a kill loop. Call AFTER wait_for_cs2_process. GS_REAP_WEBHELPER=0 opts out.
+trim_steam_webhelper() {
+  case "${GS_REAP_WEBHELPER:-1}" in 0|off|false|no) return 0 ;; esac
+  pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1 || {
+    log "trim_steam_webhelper: cs2 not running — skipping"
+    return 0
+  }
+  local before after
+  before=$(steam_webhelper_rss_kb)
+  [ "$before" -gt 0 ] || return 0
+  pkill -f steamwebhelper 2>/dev/null || true
+  sleep 2
+  pkill -9 -f steamwebhelper 2>/dev/null || true
+  sleep 2
+  after=$(steam_webhelper_rss_kb)
+  if [ "$after" -gt 0 ]; then
+    log "trim_steam_webhelper: respawned ($(( after / 1024 ))MB) — leaving it alone"
+  else
+    log "trim_steam_webhelper: freed $(( before / 1024 ))MB"
+  fi
 }
 
 # Launch Steam with login prefilled. UI visible so we can watch via the

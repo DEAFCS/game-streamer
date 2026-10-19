@@ -14,6 +14,14 @@ export const gsiState = {
   roundNumber:      null,
   spectatedSteamId: null,
   specSlots:        [],
+  // The `player` block for THIS client. On a server we joined as a player it's
+  // the only block GSI sends (allplayers/allgrenades are observer-only); the
+  // nade render pod's session gate reads its health.
+  localPosition:    null,
+  localForward:     null,
+  localHealth:      0,
+  localActivity:    null,
+  localTeam:        null,
   teamCtName:       null,
   teamTName:        null,
   teamCtScore:      0,
@@ -57,6 +65,11 @@ export function applyGsiUpdate(body) {
     : null;
   gsiState.roundNumber      = typeof map.round === "number" ? map.round : null;
   gsiState.spectatedSteamId = typeof player.steamid === "string" ? player.steamid : null;
+  gsiState.localPosition    = parsePosition(player.position);
+  gsiState.localForward     = parsePosition(player.forward);
+  gsiState.localHealth      = Number(player?.state?.health ?? 0) || 0;
+  gsiState.localActivity    = typeof player.activity === "string" ? player.activity : null;
+  gsiState.localTeam        = player.team === "T" || player.team === "CT" ? player.team : null;
   gsiState.teamCtName       = typeof map?.team_ct?.name === "string" ? map.team_ct.name : null;
   gsiState.teamTName        = typeof map?.team_t?.name === "string" ? map.team_t.name : null;
   gsiState.teamCtScore      = Number(map?.team_ct?.score ?? 0) || 0;

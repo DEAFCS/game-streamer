@@ -21,6 +21,8 @@ usage: $(basename "$0") <command>
   demo              setup Steam + download \$DEMO_URL + play it back + capture
   batch-highlights  demo flow with CLIP_BATCH_MODE=1 â€” renders \$CLIP_BATCH_JOBS
                     sequentially against the same cs2 instance, then exits
+  nade-previews     connect to a nade practice server and record \$NADE_BATCH_JOBS
+                    (one preview clip per lineup) from that one session, then exits
   warm-shaders      boot CS2, run the Vulkan shader precache to completion,
                     then exit â€” pre-warms this node's cache (no match needed)
 EOF
@@ -173,6 +175,11 @@ case "$cmd" in
   batch-highlights)
     export CLIP_BATCH_MODE=1
     run_demo_flow "$@"
+    ;;
+  nade-previews)
+    export NADE_BATCH_MODE=1
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/run-nades.sh" "$@"
     ;;
   warm-shaders)
     # Pre-warm this node's shader cache (no match). Run as a per-node Job.

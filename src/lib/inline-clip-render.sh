@@ -85,6 +85,7 @@ api_status() {
   local body
   body=$(node "$CLIP_HELPERS" status-body "$@")
   curl --fail --silent --show-error --max-time 10 \
+       --retry 3 --retry-connrefused --retry-delay 1 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/json" \
        --data "$body" \
@@ -144,7 +145,7 @@ parse_upload_progress() {
 }
 
 spec_get_state() {
-  curl --fail --silent --show-error --max-time 5 \
+  spec_curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL}/demo/state"
 }
 
@@ -153,7 +154,7 @@ spec_post() {
   local body="${1:-{\}}"
   local http_code
   http_code=$(printf '%s' "$body" \
-    | curl --silent --show-error --max-time 5 \
+    | spec_curl --silent --show-error --max-time 5 \
         --header "content-type: application/json" \
         --data-binary @- \
         --write-out "%{http_code}" \
@@ -174,12 +175,74 @@ die_failed() {
   exit 1
 }
 
-# Fail the job on the GetClassBaseline crash; drop the sentinel so the batch skips.
+# Fail the job on an engine fatal (the GetClassBaseline crash, or cs2 gone) and drop
+# the sentinel so the batch relaunches cs2. With CLIP_CS2_FATAL_RETRY=1 the batch
+# also retries this job on the new cs2, so no error is posted for it.
 fail_on_cs2_fatal() {
-  local reason
-  reason=$(cs2_fatal_reason "${CS2_LOG_OFFSET:-0}") || return 0
+  local reason msg
+  if reason=$(cs2_fatal_reason "${CS2_LOG_OFFSET:-0}"); then
+    msg="cs2 cannot play this demo (${reason}) — known unfixed cs2 replay bug"
+  elif ! pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1; then
+    reason="cs2 process exited"
+    msg="cs2 engine fatal: cs2 exited during seg ${SEG_IDX}"
+  else
+    return 0
+  fi
   cs2_mark_fatal "$reason"
-  die_failed "cs2 cannot play this demo (${reason}) â€” known unfixed cs2 replay bug"
+  stop_capture_diag
+  stop_clip_capture
+  if [ "${CLIP_CS2_FATAL_RETRY:-0}" = "1" ]; then
+    say "ERROR: ${msg} — the batch relaunches cs2 and retries this job"
+    api_progress_settle kill
+    CLIP_REACHED_TERMINAL=1
+    exit "$CS2_FATAL_RETRY_RC"
+  fi
+  die_failed "$msg"
+}
+
+# What the spec-server believes about playback: its paused flag, /demo/seek-state
+# (seeking|tick|round), and who holds X focus, since the play toggle is an XTest key.
+playback_diag() {
+  local paused seek focus j
+  paused=$(spec_get_state 2>/dev/null | node "$CLIP_HELPERS" state-paused 2>/dev/null)
+  seek=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+  j=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/spec/focus" || true)
+  case "$j" in
+    *'"cs2_has_focus":true'*) focus=cs2 ;;
+    *'"cs2_has_focus":false'*)
+      focus=$(printf '%s' "$j" | sed -n 's/.*"focused_name":"\([^"]*\)".*/\1/p')
+      [ -n "$focus" ] || focus=$(printf '%s' "$j" | sed -n 's/.*"focused_window":"\([^"]*\)".*/\1/p')
+      focus="other:${focus:-none}"
+      case "$j" in *'"cs2_mapped":false'*) focus+=" cs2-unmapped" ;; esac
+      ;;
+    *) focus='?' ;;
+  esac
+  printf 'paused=%s, seek-state=%s, focus=%s' "${paused:-?}" "${seek:-?}" "$focus"
+}
+
+dump_console_since_job() {
+  local log="${CS2_DIR}/game/csgo/console.log" since="${CS2_LOG_OFFSET:-0}" size
+  [ -f "$log" ] || return 0
+  size=$(wc -c < "$log" 2>/dev/null || echo 0)
+  size="${size//[!0-9]/}"
+  [ "${size:-0}" -lt "$since" ] && since=0
+  say "cs2 console since this job started (last 20 lines):"
+  tail -c "+$((since + 1))" "$log" 2>/dev/null | tr -d '\r' | tail -n 20 | sed 's/^/    | /' >&2
+}
+
+# A segment whose GSI never changed: the demo did not play. An engine fatal ends the
+# job; anything else (left paused by a seek, a play toggle lost to focus) returns 0
+# once per segment so the caller redoes it from a fresh seek, then fails only this job.
+flat_segment_redo() {
+  fail_on_cs2_fatal
+  local msg="demo did not advance in seg ${SEG_IDX} (GSI flat ${GSI_SIG_POLLS} polls; ${FLAT_DIAG:-$(playback_diag)})"
+  if [ "${FLAT_RETRY_SEG:-}" != "$SEG_IDX" ]; then
+    FLAT_RETRY_SEG=$SEG_IDX
+    say "WARN ${msg} — re-seeking and redoing the segment once"
+    return 0
+  fi
+  dump_console_since_job
+  die_failed "$msg"
 }
 
 # Flag flipped to 1 once we've POSTed a terminal status (done / error /
@@ -309,9 +372,11 @@ on_exit() {
   fi
   [ -n "${POLISH_BG_LOG:-}" ] && rm -f "$POLISH_BG_LOG"
   [ -n "${CHIP_RENDER_LOG:-}" ] && rm -f "$CHIP_RENDER_LOG"
-  # ProRes intermediates are ~20MB/s â€” drop the chip mov even on
-  # error so a flapping pod doesn't fill its scratch dir.
+  # Every job of a batch pod shares CLIP_OUT_DIR, and ProRes intermediates
+  # are ~20MB/s — a job that never reached upload drops all of its scratch.
   if [ -n "${CHIP_MOV:-}" ]; then rm -f "$CHIP_MOV"; fi
+  if [ -n "${SEG_DIR:-}" ]; then rm -rf "$SEG_DIR"; fi
+  if [ -n "${CLIP_OUT_FILE:-}" ]; then rm -f "$CLIP_OUT_FILE"; fi
   stop_capture_diag
   restore_user_playback
   # Belt-and-suspenders status report. If we exited without having
@@ -345,7 +410,7 @@ fi
 # pipeline per STEP 7 poll. A stale spec-server (dev-pod rsync without a
 # restart) 404s â€” fall back to the node parser and warn.
 CAPTURE_FIELDS_FAST=0
-CF_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+CF_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
   --max-time 5 "${SPEC_SERVER_URL}/demo/capture-fields?pov=0" || echo 000)
 if [ "$CF_PROBE" = "200" ]; then
   CAPTURE_FIELDS_FAST=1
@@ -353,7 +418,7 @@ else
   say "WARN /demo/capture-fields probe -> ${CF_PROBE} â€” spec-server predates it; using node fallback (restart spec-server)"
 fi
 POV_STATE_FAST=0
-PS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+PS_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
   --max-time 5 "${SPEC_SERVER_URL}/demo/pov-state?pov=0" || echo 000)
 if [ "$PS_PROBE" = "200" ]; then
   POV_STATE_FAST=1
@@ -379,9 +444,18 @@ else
   say "WARN /demo/seek-state probe -> ${SS_PROBE} — spec-server predates it; using /demo/state fallback (restart spec-server)"
 fi
 
+SEEK_STATE_FAST=0
+SS_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
+  --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || echo 000)
+if [ "$SS_PROBE" = "200" ]; then
+  SEEK_STATE_FAST=1
+else
+  say "WARN /demo/seek-state probe -> ${SS_PROBE} — spec-server predates it; using /demo/state fallback (restart spec-server)"
+fi
+
 # "spectated_steam_id|pov_slot|slots_count|tick" from the fast endpoint.
 spec_pov_state() {
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL}/demo/pov-state?pov=${1:-}" || true
 }
 
@@ -390,7 +464,7 @@ spec_pov_state() {
 seek_in_progress() {
   local line
   if [ "$SEEK_STATE_FAST" = "1" ]; then
-    line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+    line=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
     printf '%s' "${line%%|*}"
     return
   fi
@@ -432,7 +506,7 @@ wait_seek_settled() {
 # "phase|phase_ends|motion|gsi_age|map_phase|round|pov_kills"; empty on failure.
 capture_fields_line() {
   if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-    curl --fail --silent --max-time 5 \
+    spec_curl --fail --silent --max-time 5 \
       "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true
   else
     spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true
@@ -516,7 +590,7 @@ wait_preroll() {
 # Log whether cs2's demo bar is on screen right now; echoes 1 when it is.
 demoui_probe() {
   local line
-  line=$(curl --fail --silent --max-time 8 "${SPEC_SERVER_URL}/demo/demoui-score" || echo "?|?|?")
+  line=$(spec_curl --fail --silent --max-time 8 "${SPEC_SERVER_URL}/demo/demoui-score" || echo "?|?|?")
   say "DEMOUI [$1]: visible|score|brightness = ${line}"
   printf '%s' "${line%%|*}"
 }
@@ -885,6 +959,22 @@ fi
 case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
   ''|*[!0-9]*) DEMO_TOTAL_TICKS_FOR_GUARD="" ;;
 esac
+# Without playcast the server keeps recording for tv_delay seconds after gameover, so
+# the demo's last tick can sit minutes past the match end. Guard the match end instead:
+# playing past it (the warm-up's fast replay included) puts cs2 on the post-match screen
+# and back to the main menu, and the clip records that.
+if [ -s "$ROUND_TICKS_PATH" ]; then
+  MATCH_END_TICK=$(node "$CLIP_HELPERS" rounds-match-end-tick "$ROUND_TICKS_PATH" 2>/dev/null || true)
+  case "$MATCH_END_TICK" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] || [ "$MATCH_END_TICK" -lt "$DEMO_TOTAL_TICKS_FOR_GUARD" ]; then
+        say "MATCH_END_GUARD match ends at tick ${MATCH_END_TICK}, before the demo's last tick ${DEMO_TOTAL_TICKS_FOR_GUARD:-?}"
+        DEMO_TOTAL_TICKS_FOR_GUARD=$MATCH_END_TICK
+      fi
+      ;;
+  esac
+fi
 if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] && [ -s "$ROUND_TICKS_PATH" ]; then
   DEMO_TOTAL_TICKS_FOR_GUARD=$(node "$CLIP_HELPERS" rounds-last-end-tick "$ROUND_TICKS_PATH" 2>/dev/null || true)
   case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
@@ -904,7 +994,7 @@ if [ -n "${MATCH_ID:-}" ]; then
   LIVE_CAPTURE_STOPPED=1
 fi
 
-# CLIP_BAKE_BRANDING=1 enables the player chip + outro. Default off.
+# CLIP_BAKE_BRANDING enables the player chip + outro. Default on.
 BRANDING_ENABLED="${CLIP_BAKE_BRANDING:-1}"
 say "BRANDING enabled=${BRANDING_ENABLED}"
 
@@ -1037,20 +1127,10 @@ CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 
+# Survives across the per-clip `bash inline-clip-render.sh` invocations of a
+# batch run (each clip is its own process), so the encoder-matched outro is
+# transcoded once per pod instead of once per clip.
 OUTRO_CACHE_DIR="${OUTRO_CACHE_DIR:-$CLIP_OUT_DIR/.outro-cache}"
-
-# Cache path for the encoder-matched outro, keyed on everything that changes its
-# bytes — source file identity, encoder args, fps — so a codec/tier switch on a
-# later clip can never reuse a mismatched file.
-matched_outro_cache_path() {
-  mkdir -p "$OUTRO_CACHE_DIR" || return 1
-  local stamp key
-  stamp=$(stat -c '%s:%Y' "$OUTRO_FILE" 2>/dev/null || echo '?')
-  key=$(printf '%s|%s|%s|%s' \
-          "$OUTRO_FILE" "$stamp" "${FFMPEG_VENC_ARGS[*]}" "${CLIP_OUTPUT_FPS:-60}" \
-        | md5sum | cut -c1-12)
-  printf '%s/outro-%s.mp4\n' "$OUTRO_CACHE_DIR" "$key"
-}
 
 # Precompute: will an outro be appended at concat time? If yes AND we
 # would have run a per-segment chip-overlay pass, we can fuse both into
@@ -1142,6 +1222,7 @@ SEG_IDX=0
 VKCAP_FELL_BACK=0
 VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
 VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
+FLAT_RETRY_SEG=""         # segment already redone once after its GSI stayed flat
 # Parse the segment table once (one node spawn) instead of 3x per
 # segment iteration. POV accountid = steamid64 - 76561197960265728;
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
@@ -1257,13 +1338,12 @@ warm_pipelines_if_cold() {
 }
 
 # Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
-# while paused. observer_slot may also have shifted. Verify via GSI like STEP 4b
-# instead of a fire-and-forget spec_post -- a silently missed re-press here is
-# what caused the wrong-POV ("mouse bug") clips.
+# while paused. observer_slot may also have shifted.
 repress_pov_after_play() {
   [ -n "${SEG_POV_STEAMID:-}" ] || return 0
-  verify_spec_lock "$SEG_POV_STEAMID" || true
-  say "STEP 5: after re-lock, GSI spectated=$(gsi_spectated_steamid)"
+  POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
+  say "STEP 5: re-press slot=${POV_SLOT_AFTER_PLAY:-NONE}; GSI spectated=$(gsi_spectated_steamid)"
+  [ -n "$POV_SLOT_AFTER_PLAY" ] && spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
 }
 
 while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
@@ -1468,6 +1548,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
   GSI_SIG_CHANGED=0
   GSI_SIG_POLLS=0
+  FLAT_DIAG=""
   # Billing starts at the gate: recording began there, and the checks above (a cs2
   # fatal probe can take seconds) were recorded but went unbilled, so the clip ran
   # long and every "+Nt" below was measured from the wrong moment.
@@ -1495,7 +1576,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # spec-server. Fallback (stale server): the old curl+node pipeline.
     # A failed fetch yields an empty line -> all fields empty, same as before.
     if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-      FS_LINE=$(curl --fail --silent --max-time 5 \
+      FS_LINE=$(spec_curl --fail --silent --max-time 5 \
         "${SPEC_SERVER_URL}/demo/capture-fields?pov=${SEG_POV_STEAMID:-}" || true)
     else
       FS_LINE=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}" || true)
@@ -1510,6 +1591,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
       GSI_SIG_POLLS=$((GSI_SIG_POLLS + 1))
       if [ -z "$GSI_SIG_FIRST" ]; then GSI_SIG_FIRST="$GSI_SIG"
       elif [ "$GSI_SIG" != "$GSI_SIG_FIRST" ]; then GSI_SIG_CHANGED=1; fi
+      # Snapshot now: the stop below force-pauses, which would hide whether it was paused.
+      if [ "$GSI_SIG_POLLS" = 12 ] && [ "$GSI_SIG_CHANGED" = 0 ]; then
+        FLAT_DIAG=$(playback_diag)
+      fi
     fi
 
     # Anchor the bleed guard to the round we opened in (first fresh reading).
@@ -1613,13 +1698,6 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     say "STEP 7: loop iters=${LOOP_ITERS} avg_period=$(( (NOW_MS - WALLCLOCK_START_MS) / LOOP_ITERS ))ms"
   fi
 
-  # GSI never changed all segment -> demo halted -> frozen clip; fail and mark
-  # the session dead so the batch skips.
-  if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
-    cs2_mark_fatal "demo never advanced (GSI flat over ${GSI_SIG_POLLS} polls): ${GSI_SIG_FIRST}"
-    die_failed "cs2 cannot play this demo (GetClassBaseline replay bug)"
-  fi
-
   stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
@@ -1629,6 +1707,12 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE" "${CLIP_CAPTURE_TIMING_FILE:-}"
   fi
   [ -n "${CLIP_CAPTURE_TIMING_FILE:-}" ] && rm -f "$CLIP_CAPTURE_TIMING_FILE"
+
+  if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
+    flat_segment_redo
+    rm -f "$SEG_FILE"
+    continue   # same SEG_IDX: STEP 2 re-pauses, re-seeks and plays it again
+  fi
 
   # Sanity check the RAW capture before any polish: capture sometimes
   # produces an mp4 with no decodable frames (cs2 mid-load, audio attach
@@ -1825,10 +1909,24 @@ fi
 # mismatched params on some pods. Re-encode is the fallback for that
 # case, using the same codec family as the segments to keep file
 # sizes consistent.
+# Cache path for the encoder-matched outro, keyed on everything that changes its
+# bytes — source file identity, encoder args, fps — so a codec/tier switch on a
+# later clip can never reuse a mismatched file.
+matched_outro_cache_path() {
+  mkdir -p "$OUTRO_CACHE_DIR" || return 1
+  local stamp key
+  stamp=$(stat -c '%s:%Y' "$OUTRO_FILE" 2>/dev/null || echo '?')
+  key=$(printf '%s|%s|%s|%s' \
+          "$OUTRO_FILE" "$stamp" "${FFMPEG_VENC_ARGS[*]}" "${CLIP_OUTPUT_FPS:-60}" \
+        | md5sum | cut -c1-12)
+  printf '%s/outro-%s.mp4\n' "$OUTRO_CACHE_DIR" "$key"
+}
+
 # Stream-copy fast path for the outro concat: when every captured
 # segment went through the per-segment polish (one uniform encoder
-# invocation), transcode the short outro once with the same args and
-# concat-demux `-c copy` the whole montage â€” skipping the second full
+# invocation), transcode the short outro to match those args — once per
+# pod, cached across the clips of a batch — and concat-demux `-c copy`
+# the whole montage, skipping the second full
 # re-encode. The trailing-PTS concern documented below applies to RAW
 # gst captures; polished files are clean ffmpeg muxes. PTS pathologies
 # survive -c copy silently, so the output duration is verified; any
@@ -1994,6 +2092,7 @@ else
   fi
 fi
 rm -rf "$SEG_DIR"
+if [ -n "$CHIP_MOV" ]; then rm -f "$CHIP_MOV"; fi
 
 if [ "$LIVE_CAPTURE_STOPPED" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
   say "STEP 9a: restart live capture"
@@ -2004,7 +2103,9 @@ api_status "status=rendering" "progress=1.0"
 
 restore_user_playback
 SAVED_TICK=""
-trap - EXIT
+# on_exit drives cs2 playback, which the next batch job now owns, so the
+# upload tail only drops the clip it was uploading.
+trap 'rm -f "$CLIP_OUT_FILE"' EXIT
 
 # Batch mode: cs2/demo work is done â€” signal the batch loop so the next
 # job can start capturing while this job's thumbnail+upload tail

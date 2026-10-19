@@ -18,7 +18,7 @@ index 3db3698..e1fca4b 100644
 +  if (process.env.HUD_AUTO_OVERLAY === '1') {
 +    const hudPort = process.env.HUD_PORT || '1349'
 +    const hudVariant = process.env.HUD_VARIANT || ''
-+    let hudUrl = `http://localhost:${hudPort}/huds/default/index.html`
++    let hudUrl = `http://127.0.0.1:${hudPort}/huds/default/index.html`
 +    if (hudVariant) hudUrl += `?variant=${encodeURIComponent(hudVariant)}`
 +    setTimeout(() => {
 +      try {
@@ -42,7 +42,7 @@ index 16f3fad..7ad7455 100644
  import path from 'path'
  import fs from 'fs'
  import net from 'net'
-@@ -52,66 +52,78 @@ const getCfgPath = (steamPath: string) =>
+@@ -52,66 +52,104 @@ const getCfgPath = (steamPath: string) =>
 
  let activeOverlay: BrowserWindow | null = null
 
@@ -157,6 +157,32 @@ index 16f3fad..7ad7455 100644
 +  activeOverlay = overlayWindow
 +  overlayWindow.setIgnoreMouseEvents(true, { forward: true })
 +  overlayWindow.loadURL(hudUrl)
++
++  // 5stack: the overlay renderer is otherwise a black box -- surface its
++  // console in the pod log so injected scripts can be diagnosed without a rebuild.
++  overlayWindow.webContents.on('console-message', (_e, _level, message, line, sourceId) => {
++    console.log(`[overlay-console] ${message} (${sourceId}:${line})`)
++  })
++
++  // 5stack: the spectated player's camera. Loaded from disk and injected
++  // rather than embedded here so the overlay stays a normal reviewable file,
++  // and appended to the page rather than woven into the HUD's own DOM.
++  const cameraOverlayPath = process.env.HUD_CAMERA_OVERLAY_JS
++  if (cameraOverlayPath) {
++    overlayWindow.webContents.on('did-finish-load', () => {
++      try {
++        const specBase = process.env.SPEC_BASE || 'http://127.0.0.1:1350'
++        const js = fs.readFileSync(cameraOverlayPath, 'utf-8')
++        void overlayWindow.webContents
++          .executeJavaScript(
++            `window.__FIVESTACK_SPEC_BASE__ = ${JSON.stringify(specBase)};\n${js}`
++          )
++          .catch((e) => console.error('[camera-overlay] inject failed:', e))
++      } catch (e) {
++        console.error('[camera-overlay] could not read overlay script:', e)
++      }
++    })
++  }
 +  enforceOverlayOnTop(overlayWindow)
 +
 +  overlayWindow.on('closed', () => {
@@ -227,7 +253,7 @@ index d835180..e8ca509 100644
 +    const variant =
 +      typeof body.variant === 'string' && body.variant ? body.variant : null
 +    const port = process.env.HUD_PORT || 1349
-+    let hudUrl = `http://localhost:${port}/huds/${hudId}/index.html`
++    let hudUrl = `http://127.0.0.1:${port}/huds/${hudId}/index.html`
 +    if (variant) hudUrl += `?variant=${encodeURIComponent(variant)}`
 +    openOverlayForHud(hudUrl)
 +    res.json({ ok: true, hudId, variant, hudUrl })
@@ -245,3 +271,18 @@ index d835180..e8ca509 100644
  setupSockets(io)
 
  // Setup GSI Listener Server (Port 23415)
+@@ -84,9 +124,12 @@ export function startServers(): void {
+     }
+   })
+-  httpServer.listen(HUD_PORT, () => {
++  // 5stack: loopback only. The streamer pod shares the node's network, and the
++  // socket feed re-emits every player's position, a live radar of the match.
++  // Both answer only on the node's loopback, where all their clients are.
++  httpServer.listen(Number(HUD_PORT), '127.0.0.1', () => {
+     console.log(`HUD Server and WebSockets listening on port ${HUD_PORT}`)
+   })
+ 
+-  const gsiServer = gsiApp.listen(GSI_PORT, () => {
++  const gsiServer = gsiApp.listen(Number(GSI_PORT), '127.0.0.1', () => {
+     console.log(`CS2 GSI Listener running on port ${GSI_PORT}`)
+   })

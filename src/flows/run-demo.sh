@@ -169,6 +169,9 @@ snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
 cl_show_observer_crosshair 0
+// Pooled Steam accounts also film utility previews, which trim the HUD to the
+// kill feed; cs2 can keep that in the account's config.
+cl_draw_only_deathnotices 0
 // cl_demo_predict is env-tunable via CS2_DEMO_PREDICT (injected into
 // live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.
@@ -329,31 +332,52 @@ do_applaunch() {
   spawn_logged cs2-launch "${cmd[@]}"
 }
 CS2_CONSOLE_LOG="$CS2_DIR/game/csgo/console.log"
-CS2_CONSOLE_OFFSET=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
-CS2_CONSOLE_OFFSET="${CS2_CONSOLE_OFFSET//[!0-9]/}"
-do_applaunch
-wait_for_cs2_process do_applaunch
-apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) now
-( shader_log_report "this launch"; shader_cache_breakdown ) &   # diagnostics; du of ~20GB, off the launch path
 
-minimize_steam_windows
-
-report_status status=connecting_to_game
-WIN=""
-for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
-  WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
-    | awk '/"Counter-Strike 2"/{print $1; exit}')
-  [ -n "$WIN" ] && break
-  if ! kill -0 "$CS2_PID" 2>/dev/null; then
-    tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
-    die "cs2 EXITED early"
+# Launch cs2 on the demo and wait for its window. Returns 1 with CS2_LAUNCH_ERROR set
+# instead of dying, so a clip batch can relaunch a cs2 that hit an engine fatal;
+# "relaunch" skips the boot status reports (a batch fans those out to every job).
+launch_cs2_window() {
+  local mode="${1:-}"
+  CS2_LAUNCH_ERROR=""
+  CS2_CONSOLE_OFFSET=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
+  CS2_CONSOLE_OFFSET="${CS2_CONSOLE_OFFSET//[!0-9]/}"
+  do_applaunch
+  wait_for_cs2_process do_applaunch
+  apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) now
+  if [ "$mode" != relaunch ]; then
+    ( shader_log_report "this launch"; shader_cache_breakdown ) &   # diagnostics; du of ~20GB, off the launch path
   fi
-  sleep 1
-done
-[ -n "$WIN" ] || {
-  tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
-  die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
+
+  minimize_steam_windows
+  trim_steam_webhelper  # ~1GB of CEF we no longer need once cs2 is up
+
+  if [ "$mode" != relaunch ]; then
+    report_status status=connecting_to_game
+  fi
+  WIN=""
+  for _ in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
+    WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+      | awk '/"Counter-Strike 2"/{print $1; exit}')
+    [ -n "$WIN" ] && break
+    if ! kill -0 "$CS2_PID" 2>/dev/null; then
+      tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
+      CS2_LAUNCH_ERROR="cs2 EXITED early"
+      return 1
+    fi
+    sleep 1
+  done
+  if [ -z "$WIN" ]; then
+    tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
+    CS2_LAUNCH_ERROR="no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
+    return 1
+  fi
+
+  # minimize+trim just destroyed the windows holding X input focus and there's no
+  # WM to reassign it, so every XTest keystroke would land nowhere until something
+  # focuses cs2. windowfocus is XSetInputFocus — it does NOT restack over the HUD.
+  timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
 }
+launch_cs2_window || die "$CS2_LAUNCH_ERROR"
 
 # minimize+trim just destroyed the windows holding X input focus and there's no
 # WM to reassign it, so every XTest keystroke would land nowhere until something

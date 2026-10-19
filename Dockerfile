@@ -185,6 +185,8 @@ RUN mkdir -p /opt/steamcmd \
 # (it's a const string in upstream src/main/ipc.ts); lib/hud-manager.sh's
 # write_hud_gsi_cfg writes a matching cfg at runtime into cs2's cfg dir.
 COPY --from=hud /opt/hud-manager/ /opt/hud-manager/
+# Injected into the overlay window by auto-overlay.patch (HUD_CAMERA_OVERLAY_JS).
+COPY hud-manager/camera-overlay.js /opt/hud-manager/camera-overlay.js
 
 RUN locale-gen en_US.UTF-8
 

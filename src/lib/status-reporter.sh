@@ -67,17 +67,46 @@ _status_reporter_configured() {
   if [ -n "$STATUS_REPORT_URL" ] && [ -n "$STATUS_AUTH_TOKEN" ]; then
     return 0
   fi
+  # A nade preview pod rides along on someone's practice match, so MATCH_ID and
+  # CONNECT_PASSWORD are both set — but it is NOT that match's streamer, and
+  # POSTing to /game-streamer/:id/status would flip the match's live state.
+  # Its status goes out per render job instead.
+  if [ "${NADE_BATCH_MODE:-0}" = "1" ]; then
+    return 1
+  fi
   [ -n "$MATCH_ID" ] && [ -n "$MATCH_PASSWORD" ]
 }
 
-# True when this pod is processing a batch of highlight render jobs.
-_in_batch_broadcast_mode() {
-  [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]
+# The queue this pod is draining, if any: highlight clips or nade previews.
+# Both ship a JSON array of {job_id, token, spec} and both have per-job status
+# endpoints, so one broadcast path serves them.
+_batch_jobs_blob() {
+  if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
+    printf '%s' "$CLIP_BATCH_JOBS"
+    return 0
+  fi
+  if [ "${NADE_BATCH_MODE:-0}" = "1" ] && [ -n "${NADE_BATCH_JOBS:-}" ]; then
+    printf '%s' "$NADE_BATCH_JOBS"
+    return 0
+  fi
+  return 1
 }
 
-# POSTs $body to /clip-renders/:id/status for every job in
-# CLIP_BATCH_JOBS. Curls fan out in parallel â€” N jobs cost max(curl)
-# (~3s timeout) not N*3s â€” and we wait so callers don't leak zombies.
+_batch_status_resource() {
+  if [ "${NADE_BATCH_MODE:-0}" = "1" ] && [ -n "${NADE_BATCH_JOBS:-}" ]; then
+    printf 'nade-renders'
+  else
+    printf 'clip-renders'
+  fi
+}
+
+_in_batch_broadcast_mode() {
+  _batch_jobs_blob >/dev/null 2>&1
+}
+
+# POSTs $body to /<resource>/:id/status for every job in the batch. Curls fan
+# out in parallel — N jobs cost max(curl) (~3s timeout) not N*3s — and we wait
+# so callers don't leak zombies.
 _broadcast_to_batch_jobs() {
   local body="$1"
   [ -n "$body" ] || return 0
@@ -86,8 +115,9 @@ _broadcast_to_batch_jobs() {
   [ -f "$helpers" ] || return 0
   command -v node >/dev/null 2>&1 || return 0
 
-  local creds id token
-  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
+  local resource creds id token
+  resource=$(_batch_status_resource)
+  creds=$(_batch_jobs_blob \
     | node "$helpers" jobs-credentials 2>/dev/null) || return 0
   [ -n "$creds" ] || return 0
 
@@ -99,7 +129,7 @@ _broadcast_to_batch_jobs() {
       -H "Content-Type: application/json" \
       --data-binary "$body" \
       -o /dev/null \
-      "${STATUS_API_BASE}/clip-renders/${id}/status" \
+      "${STATUS_API_BASE}/${resource}/${id}/status" \
       2>/dev/null &
     pids+=( "$!" )
   done <<< "$creds"
@@ -117,13 +147,13 @@ _encode_status_body() {
   node "$helpers" status-body "$@" 2>/dev/null
 }
 
-# Fan errors out to every job in CLIP_BATCH_JOBS â€” batch pods have no
-# single status channel, so die() relies on this instead.
+# Fan errors out to every job in the batch — batch pods have no single status
+# channel, so die() relies on this instead.
 broadcast_batch_error() {
   _in_batch_broadcast_mode || return 0
   [ "$#" -gt 0 ]           || return 0
 
-  # clip_render_jobs use status="error" (not "errored" like match_streams).
+  # Render jobs use status="error" (not "errored" like match_streams).
   local mapped=() arg
   for arg in "$@"; do
     case "$arg" in
@@ -305,8 +335,8 @@ _status_daemon_loop() {
 
 start_status_reporter() {
   if ! _status_reporter_configured; then
-    if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
-      log "status-reporter: batch-highlights mode â€” broadcasting per-job"
+    if _in_batch_broadcast_mode; then
+      log "status-reporter: batch mode ($(_batch_status_resource)) — broadcasting per-job"
     else
       log "status-reporter: disabled (MATCH_ID/MATCH_PASSWORD unset)"
     fi

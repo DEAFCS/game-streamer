@@ -7,6 +7,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { z } from "zod";
+import { renderableAvatarUrl } from "./avatar-url";
 import { BRAND, FONT_STACK } from "./brand";
 
 const CrosshairIcon: React.FC<{ size: number; color: string }> = ({
@@ -99,6 +100,7 @@ export const PlayerChip: React.FC<PlayerChipProps> = ({
   );
 
   const initial = (name?.[0] ?? "H").toUpperCase();
+  const avatarSrc = renderableAvatarUrl(avatarUrl);
 
   return (
     <AbsoluteFill
@@ -133,9 +135,9 @@ export const PlayerChip: React.FC<PlayerChipProps> = ({
             boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
           }}
         >
-          {avatarUrl ? (
+          {avatarSrc ? (
             <Img
-              src={avatarUrl}
+              src={avatarSrc}
               style={{ width: "100%", height: "100%", objectFit: "cover" }}
             />
           ) : (

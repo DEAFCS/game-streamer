@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "main"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Some tests import .ts files directly, which Node runs without a flag
+      # only from 22.18. check-latest keeps the runner's cached 22 from being
+      # an older one.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          check-latest: true
+
+      - name: Node can strip .ts types
+        run: |
+          node -e '
+            const [major, minor] = process.versions.node.split(".").map(Number);
+            if (major < 22 || (major === 22 && minor < 18)) {
+              console.error(`node ${process.versions.node} cannot run .ts imports; the suite needs 22.18 or later`);
+              process.exit(1);
+            }
+            console.log(`node ${process.versions.node}`);
+          '
+
+      # The suite stubs cs2, chromium, ffmpeg and xdotool, so it needs only
+      # node and bash.
+      - name: node --test
+        run: node --test

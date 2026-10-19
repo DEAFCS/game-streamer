@@ -14,16 +14,52 @@ export function sendJson(res, code, obj) {
   res.end(body);
 }
 
-export function readJsonBody(req) {
+const JSON_BODY_LIMIT = 1024 * 1024;
+
+class BodyError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export function readBody(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
-      if (!raw) return resolve({});
-      try { resolve(JSON.parse(raw)); }
-      catch { reject(new Error("invalid json")); }
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        req.pause();
+        reject(new BodyError(413, "request body too large"));
+        return;
+      }
+      chunks.push(c);
     });
-    req.on("error", reject);
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", () => reject(new BodyError(400, "request aborted")));
   });
+}
+
+// Handlers read fields straight off the body, so anything but a JSON object
+// (a literal `null` included) reaches them as an empty one.
+export async function readJsonBody(req) {
+  const raw = await readBody(req, JSON_BODY_LIMIT);
+  if (!raw) {
+    return {};
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new BodyError(400, "invalid json");
+  }
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+export function sendBodyError(req, res, err) {
+  if (err.status === 413) {
+    res.on("finish", () => req.destroy());
+  }
+  sendJson(res, err.status, { error: err.message });
 }

@@ -58,11 +58,11 @@ spec_server_status() {
     log "  process: NOT running"
   fi
   local code
-  code=$(curl -sS -o /dev/null --max-time 2 -w '%{http_code}' \
+  code=$(spec_curl -sS -o /dev/null --max-time 2 -w '%{http_code}' \
     "http://127.0.0.1:${SPEC_SERVER_PORT}/health" 2>/dev/null)
   if [ "$code" = "200" ]; then
     log "  health:  OK on :$SPEC_SERVER_PORT"
-    curl -sS --max-time 2 "http://127.0.0.1:${SPEC_SERVER_PORT}/health" 2>/dev/null \
+    spec_curl -sS --max-time 2 "http://127.0.0.1:${SPEC_SERVER_PORT}/health" 2>/dev/null \
       | sed 's/^/    /'
   else
     log "  health:  unreachable (curl status: ${code:-no response})"

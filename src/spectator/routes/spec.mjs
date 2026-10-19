@@ -11,7 +11,7 @@ import path from "node:path";
 import { DISPLAY, HUD_HOST, HUD_PORT, LOG_DIR } from "../env.mjs";
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
-import { sendKey } from "../cs2/input.mjs";
+import { sendKey, focusState } from "../cs2/input.mjs";
 import { loadPlayerBindings } from "../state/bindings.mjs";
 import { run } from "../util/run.mjs";
 import { sendJson } from "../util/http.mjs";
@@ -284,4 +284,11 @@ export async function specScoreboardHandler(_req, res, body) {
     ok ? 200 : 503,
     ok ? { ok, show: Boolean(body.show) } : { error: "cs2 not running" },
   );
+}
+
+// Every spectator control that drives cs2 goes through XTest, which follows X
+// input focus rather than a target window -- so "nothing responds" is almost
+// always focus having moved. This says so directly.
+export async function specFocusHandler(_req, res) {
+  sendJson(res, 200, await focusState());
 }

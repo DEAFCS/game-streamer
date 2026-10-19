@@ -1,3 +1,5 @@
+import process from "node:process";
+
 import { run } from "../util/run.mjs";
 import { findCs2Window } from "./window.mjs";
 
@@ -80,13 +82,25 @@ export async function focusState() {
 }
 
 export async function sendKey(key) {
-  if ((await findCs2Window()) === null) return false;
+  const win = await findCs2Window();
+
+  if (win === null) {
+    return false;
+  }
+
+  await focusCs2(win);
   await run(["xdotool", "key", "--clearmodifiers", key]);
   return true;
 }
 
 export async function sendConsoleCommand(cmd) {
-  if ((await findCs2Window()) === null) return false;
+  const win = await findCs2Window();
+
+  if (win === null) {
+    return false;
+  }
+
+  await focusCs2(win);
   await run(["xdotool", "key", "--clearmodifiers", "grave"]);
   await new Promise((r) => setTimeout(r, 80));
   await run(["xdotool", "type", "--delay", "20", cmd]);

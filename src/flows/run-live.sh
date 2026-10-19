@@ -106,6 +106,9 @@ engine_no_focus_sleep 0
 volume 1.0
 // TrueView off for live spectating too (cs2 2026-09-23+ cvar): smooth beats pixel-perfect.
 cl_spectator_predict 0
+// Pooled Steam accounts also film utility previews, which trim the HUD to the
+// kill feed; cs2 can keep that in the account's config.
+cl_draw_only_deathnotices 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
@@ -239,6 +242,7 @@ apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) no
 ( shader_log_report "this launch"; shader_cache_breakdown ) &   # diagnostics; du of ~20GB, off the launch path
 
 minimize_steam_windows
+trim_steam_webhelper  # ~1GB of CEF we no longer need once cs2 is up
 
 report_status status=connecting_to_game
 WIN=""

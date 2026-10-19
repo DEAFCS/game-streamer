@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # JTs Hud Manager (CS2 spectator HUD; upstream JohnTimmermann/JTs-Hud-Manager).
 # Electron app exposing HUD_PORT (admin + socket.io) and HUD_GSI_PORT (cs2
-# gamestate POSTs). Our auto-overlay.patch adds POST /api/overlay/start and
+# gamestate POSTs), both on 127.0.0.1 only, so HUD_HOST has to stay
+# loopback. Our auto-overlay.patch adds POST /api/overlay/start and
 # auto-opens a fullscreen transparent BrowserWindow on the same Xorg-dummy
 # as cs2 so ximagesrc captures both composited.
 
@@ -29,16 +30,18 @@
 # HUD_SLUG + HUD_BUNDLE_URL are only set for an imported HUD.
 : "${HUD_SLUG:=}"
 : "${HUD_BUNDLE_URL:=}"
-# install_custom_hud/reload_hud_overlay reach the spec-server through this;
-# it never holds the match credentials itself. (Excludes the upstream
-# camera-overlay feature (#34), which we're not taking.)
+# Injected into the overlay window by auto-overlay.patch, which reads it from
+# disk at did-finish-load. Unset it to run without the camera overlay.
+: "${HUD_CAMERA_OVERLAY_JS:=}"  # DEAFCS: the camera overlay is not enabled (set a path to turn it on)
+# Where that overlay reaches the spec-server for the spectated player and the
+# WHEP proxy; it never holds the match credentials itself.
 : "${SPEC_BASE:=http://127.0.0.1:${SPEC_PORT:-1350}}"
 : "${API_BASE:=}"
 : "${API_TOKEN:=}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
        HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_VARIANT HUD_ID HUD_SLUG \
-       HUD_BUNDLE_URL SPEC_BASE
+       HUD_BUNDLE_URL HUD_CAMERA_OVERLAY_JS SPEC_BASE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 
@@ -147,7 +150,7 @@ install_custom_hud() {
        --arg slug "$HUD_SLUG" \
        --arg bundleUrl "$HUD_BUNDLE_URL" \
        '{hudId: $hudId, variant: $variant, slug: $slug, bundleUrl: $bundleUrl}' \
-     | curl -fsS -m 180 -X POST -o /dev/null \
+     | spec_curl -fsS -m 180 -X POST -o /dev/null \
          -H 'content-type: application/json' \
          --data @- \
          "$SPEC_BASE/spec/hud-mode"; then
@@ -157,7 +160,7 @@ install_custom_hud() {
 }
 
 reload_hud_overlay() {
-  curl -fsS -m 5 -X POST -o /dev/null "$SPEC_BASE/spec/hud-reload" \
+  spec_curl -fsS -m 5 -X POST -o /dev/null "$SPEC_BASE/spec/hud-reload" \
     || warn "/spec/hud-reload failed"
 }
 
@@ -232,6 +235,14 @@ position_hud_overlay() {
 # Data fields are the union of what both consumers need (the HUD's set
 # from src/main/ipc.ts:GSI_CFG_CONTENT plus the director's position /
 # weapons / match_stats).
+# A motionless player generates no GSI state changes, so the heartbeat is the
+# only thing that keeps GSI fresh while a nade render stands perfectly still on
+# a lineup -- run-nades lowers GSI_HEARTBEAT for that; live/demo keep the cheap
+# 10s pulse. The value goes into the cfg via the heredoc below; the explanation
+# stays HERE, because a '#' comment inside a Valve KeyValues file is a parse
+# error ("got } in key") that makes cs2 reject the whole GSI config.
+# cs2 posts the auth token back in every body, and that is how the spec-server
+# tells its GSI from a post by anything else on the node.
 write_gsi_cfg() {
   local cfg_dir="$CS2_DIR/game/csgo/cfg"
   mkdir -p "$cfg_dir"
@@ -248,8 +259,8 @@ write_gsi_cfg() {
   "timeout" "5.0"
   "buffer" "0.0"
   "throttle" "0.1"
-  "heartbeat" "1.0"
-  "auth" { "token" "5stack-spec" }
+  "heartbeat" "${GSI_HEARTBEAT:-1.0}"
+  "auth" { "token" "${SPEC_SERVER_TOKEN:-5stack-spec}" }
   "data"
   {
     "provider"               "1"

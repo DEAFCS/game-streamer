@@ -4,3 +4,5 @@ deployment: gs-demo-dev
 workdir: /opt/5stack
 sync:
   - .:/opt/5stack
+ignore:
+  - "/.claude/worktrees"

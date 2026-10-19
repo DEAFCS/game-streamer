@@ -35,17 +35,23 @@ _snapshot_capture_one() {
 }
 
 _snapshot_targets() {
+  local batch_jobs="" batch_resource=""
   if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
+    batch_jobs="$CLIP_BATCH_JOBS"; batch_resource="clip-renders"
+  elif [ "${NADE_BATCH_MODE:-0}" = "1" ] && [ -n "${NADE_BATCH_JOBS:-}" ]; then
+    batch_jobs="$NADE_BATCH_JOBS"; batch_resource="nade-renders"
+  fi
+  if [ -n "$batch_jobs" ]; then
     local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
     [ -f "$helpers" ] || return 0
     command -v node >/dev/null 2>&1 || return 0
     local id token
-    printf '%s' "$CLIP_BATCH_JOBS" \
+    printf '%s' "$batch_jobs" \
       | node "$helpers" jobs-credentials 2>/dev/null \
       | while IFS=$'\t' read -r id token; do
           [ -n "$id" ] && [ -n "$token" ] || continue
-          printf '%s/clip-renders/%s/snapshot\t%s:%s\n' \
-            "$STATUS_API_BASE" "$id" "$id" "$token"
+          printf '%s/%s/%s/snapshot\t%s:%s\n' \
+            "$STATUS_API_BASE" "$batch_resource" "$id" "$id" "$token"
         done
     return 0
   fi

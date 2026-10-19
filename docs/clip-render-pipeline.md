@@ -60,7 +60,7 @@ upload — which is what lets job N+1 start seeking while job N is still uploadi
 | Wait for the demo to be render-ready before job 1 | `DEMO_READY_TIMEOUT` (300s) | Seeking an unloaded demo lands on tick 0 and captures black. Requires GSI to have fired **and** the demo UI panel to be hidden. |
 | At most 2 upload tails in flight | `CLIP_BATCH_MAX_TAILS` (2) | A slow API would otherwise stack every finished clip on local disk at once. The oldest is reaped before the next job starts. |
 | Warm each segment's Vulkan pipelines before recording it | `CLIP_WARMUP` (on), `CLIP_WARMUP_RATE` (4x), `CLIP_WARMUP_SETTLE_MS` (12s), `CLIP_WARMUP_ONCE` (off) | Before each segment, replays its range at 4x with nothing recording, then waits for cs2's CPU to settle (the compile queue draining), so pipeline compilation doesn't land inside a real capture. Without it the first segment rendered at ~25fps for ~7s with cs2 at ~1000% CPU, and with only the first segment warmed a later kill still held ~0.5s of frames. Ranges already warmed for this CS2 are skipped (marker file, dropped when a fresh CS2 starts). `CLIP_WARMUP_ONCE=1` warms only the first segment. |
-| An engine fatal kills the rest of the batch | `CS2_FATAL_SENTINEL` | Once CS2 dies, remaining jobs are failed fast with a reason instead of capturing frozen frames. |
+| An engine fatal relaunches CS2 | `CS2_FATAL_SENTINEL`, `CLIP_CS2_RELAUNCH_MAX` (2) | A GetClassBaseline console line, CS2's Error dialog or a dead CS2 marks the session. The batch kills CS2, relaunches it on the same demo, waits for demo-ready again and retries the job that hit it once; a second fatal fails only that job. Past the relaunch cap the remaining jobs fail fast with the reason. |
 
 ---
 
@@ -289,9 +289,9 @@ The record loop doesn't only count down.
 | Condition | Detection | Action |
 | --- | --- | --- |
 | Round bleed | GSI round number advances past the one the segment opened in | Stops immediately — the clip has run out of its round. |
-| Match end | Map phase hits gameover (armed only for segments near the demo's end) | Stops early rather than recording the post-match screen. |
+| Match end | Map phase hits gameover (armed only for segments near the match's end: the decided final round's end tick, or the demo's last tick when that is earlier) | Stops early rather than recording the post-match screen. |
 | Demo frozen | Phase clock flat for 2 consecutive polls | Withholds the time from the budget and kicks playback with pause→toggle, up to 4 times. |
-| Demo never advanced | GSI signature identical across 12+ polls | Marks the CS2 session fatal and fails the job — the known engine replay bug. |
+| Demo never advanced | GSI signature identical across 12+ polls | A real engine fatal fails the job and relaunches CS2 (see the queue rules). Anything else (demo left paused by a seek, a play toggle lost to X focus) redoes the segment from a fresh seek once, then fails only this job with `demo did not advance in seg N (GSI flat X polls; paused=…, seek-state=…, focus=…)` and dumps CS2's console since the job started. |
 | Empty capture | Raw mp4 probes as zero-length or undecodable | Retries the segment once on the ximagesrc path, then drops it from the concat rather than silently truncating the montage. |
 
 ---

@@ -35,12 +35,14 @@ function maybeReseedHudOnMapChange(currentMapName) {
 
 // Forward to hud-manager fire-and-forget. cs2 fires GSI at ~10Hz so we
 // throttle the failure log to avoid flooding when hud-manager is down.
+// hud-manager hands the body to every HUD socket client as-is, so the auth
+// block, which holds this pod's spec-server token, is dropped first.
 let lastForwardFailLogMs = 0;
-function forwardToHud(body) {
+function forwardToHud({ auth: _auth, ...state }) {
   fetch(HUD_GSI_FORWARD_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(state),
     signal: AbortSignal.timeout(2_000),
   }).catch((err) => {
     const now = Date.now();

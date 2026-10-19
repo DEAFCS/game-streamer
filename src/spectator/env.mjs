@@ -4,6 +4,9 @@ import process from "node:process";
 export const DISPLAY = process.env.DISPLAY ?? ":0";
 export const PORT    = parseInt(process.env.SPEC_PORT ?? "1350", 10);
 export const BIND    = process.env.SPEC_BIND ?? "0.0.0.0";
+// Set by the api on every pod it starts; without it every route is open, as
+// it was before the api sent one.
+export const SPEC_SERVER_TOKEN = process.env.SPEC_SERVER_TOKEN || null;
 export const LOG_DIR = process.env.LOG_DIR ?? "/tmp/game-streamer";
 
 export const DEMO_ROUND_TICKS_PATH =

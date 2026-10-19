@@ -6,12 +6,15 @@ import { findCs2Window } from "../cs2/window.mjs";
 import { bumpActivity, demoState } from "../state/demo.mjs";
 import { sendJson } from "../util/http.mjs";
 
+// The render script builds its scratch paths from the job id.
+const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
 export async function renderClipHandler(_req, res, body) {
   const jobId   = String(body.job_id ?? "");
   const token   = String(body.token  ?? "");
   const apiBase = String(body.api_base ?? "");
   const outputDims = String(body.output_dims ?? "1920x1080");
-  const outputFps  = Number.parseInt(body.output_fps, 10) || 60;
+  const outputFps  = Math.min(120, Math.max(1, Number.parseInt(body.output_fps, 10) || 60));
 
   // Multi-segment editor sends `segments`; older callers send a single
   // start_tick/end_tick pair. Normalise to an array.
@@ -39,6 +42,10 @@ export async function renderClipHandler(_req, res, body) {
     sendJson(res, 400, {
       error: "job_id, token, api_base, and at least one valid segment required",
     });
+    return;
+  }
+  if (!JOB_ID_PATTERN.test(jobId)) {
+    sendJson(res, 400, { error: "job_id must be 1-64 letters, digits, '-' or '_'" });
     return;
   }
   if (!(await findCs2Window())) {

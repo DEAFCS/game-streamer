@@ -85,18 +85,28 @@ die()  {
   exit 1
 }
 
+# The spec-server refuses any call without this pod's SPEC_SERVER_TOKEN, so
+# every in-pod call to it goes through here rather than a bare curl.
+spec_curl() {
+  curl --header "Authorization: Bearer ${SPEC_SERVER_TOKEN:-}" "$@"
+}
+
 # Detect cs2's GetClassBaseline replay crash (issue #3429): cs2 halts the demo
-# but stays alive, so a render would capture frozen frames. The sentinel lets
-# the rest of a batch skip once the session is dead.
+# but stays alive, so a render would capture frozen frames. The sentinel tells
+# the batch to relaunch cs2 before the next job.
 CS2_FATAL_SENTINEL="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/.cs2-fatal"
+# A render exits with this after a fatal when the batch will relaunch cs2 and retry it.
+# shellcheck disable=SC2034
+CS2_FATAL_RETRY_RC=75
 
 # Echo the GetClassBaseline line if cs2 logged one since byte offset $1 (caller
 # snapshots before playback so a stale line can't fail an unrelated job).
+# Case-insensitive: Valve logs both "...failed" and "find(35) Failed for class ...".
 cs2_fatal_reason() {
   local log="${CS2_DIR}/game/csgo/console.log" since="${1:-0}" hit
   if [ -f "$log" ]; then
     hit=$(tail -c "+$((since + 1))" "$log" 2>/dev/null \
-      | grep -aoE 'GetClassBaseline[^[:cntrl:]]*failed' | tail -1) || true
+      | grep -aioE 'GetClassBaseline[^[:cntrl:]]*failed' | tail -1) || true
     [ -n "$hit" ] && { printf '%s' "$hit"; return 0; }
   fi
   # console.log buffers; the Error dialog is a real-time X window.

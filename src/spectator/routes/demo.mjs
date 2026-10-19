@@ -15,6 +15,7 @@ import {
   notePauseCommanded,
   noteSeek,
 } from "../state/demo.mjs";
+import { gsiState } from "../state/gsi.mjs";
 import { loadRoundTicks } from "../state/bindings.mjs";
 import { resetPlayingState } from "../reporters/demo-playing.mjs";
 import { pushStateSoon } from "../reporters/state-push.mjs";
@@ -171,6 +172,22 @@ export async function reloadHandler(_req, res) {
     pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+}
+
+// A clip batch relaunched cs2 after an engine fatal. The new process replays the demo
+// from tick 0 and must send GSI and get its demo bar hidden before the batch records,
+// so forget everything the old one reported.
+export async function resetSessionHandler(_req, res) {
+  pendingSeek = null;
+  clearSeek();
+  demoState.lastTickAtSeek = 0;
+  demoState.lastSeekRealMs = Date.now();
+  demoState.paused = false;
+  demoState.rate = 1;
+  gsiState.lastReceivedMs = 0;
+  resetPlayingState();
+  bumpActivity();
+  sendJson(res, 200, { ok: true });
 }
 
 export async function xrayHandler(_req, res, body) {

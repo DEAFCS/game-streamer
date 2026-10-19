@@ -140,8 +140,7 @@ export function reconcileTickFromGsi(prev) {
     demoState.paused &&
     now - demoState.lastPauseCmdMs > 2_500
   ) {
-    // Re-arm the throttle immediately so a slow cs2 doesn't get spammed
-    // with pause retries every GSI tick (~10Hz) while this settles.
+    // Re-arm the throttle first so a slow cs2 isn't spammed at GSI's ~10Hz.
     notePauseCommanded();
     process.stderr.write(
       "[spec-server] pause desync: demo time advancing while paused=true — re-sending demo_pause\n",

@@ -46,9 +46,10 @@ RUN git clone --depth 1 --branch "$HUD_REF" \
 
 # Patch (additive only): expose the spectator HUD overlay creation as an
 # exported function, auto-open the bundled `default` HUD on app-ready
-# when HUD_AUTO_OVERLAY=1, add a POST /api/overlay/start route, and
-# serve the Vue admin UI over plain HTTP so the K8s Service / port-
-# forward path reaches the same panel. Tracked at
+# when HUD_AUTO_OVERLAY=1, add a POST /api/overlay/start route, serve
+# the Vue admin UI over plain HTTP so a kubectl port-forward reaches the
+# same panel, and bind both servers to loopback (the pod is hostNetwork,
+# so a wildcard bind would put them on the node's address). Tracked at
 # hud-manager/auto-overlay.patch in the game-streamer repo.
 #
 # Upstream's v5.x rewrite already does the right thing for the structural
@@ -78,7 +79,7 @@ RUN npm run build && npx electron-builder --linux --dir \
 
 # Stage the unpacked binary at a stable path. The default HUD bundle
 # lives inside resources/app.asar (under /resources/default-hud) and is
-# served by the app itself at http://localhost:1349/huds/default/...
+# served by the app itself at http://127.0.0.1:1349/huds/default/...
 # — we don't extract it. The gamestate_integration cfg is no longer
 # shipped as a file in v5.x (it's a const string in src/main/ipc.ts);
 # game-streamer's lib/hud-manager.sh:write_hud_gsi_cfg writes a
