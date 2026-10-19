@@ -67,18 +67,20 @@ export async function reconnectHandler(_req, res) {
     followUp = `password "${target.password}"; connect ${target.addr}`;
   }
 
-  // In a game the BACKSPACE bind that flushes the exec-cfg fires, so the whole
-  // thing goes through the cfg in ONE exec -- hidden from the stream, which
-  // typing into the console is not (it shows the address and password). It has
-  // to be one exec: after `disconnect` cs2 is on the main menu, where the bind
-  // no longer fires, so a second exec for the connect never ran.
+  // In a game the BACKSPACE bind that flushes the exec-cfg fires, so the connect
+  // goes through the cfg -- hidden from the stream, which typing into the
+  // console is not (it shows the address and password).
+  //
+  // No `disconnect` first: `connect` (and `playcast`) already leave the current
+  // game, and a disconnect in the same exec dropped cs2 to the main menu
+  // without the rest of the exec ever running -- the stream-deck reconnect left
+  // the streamer disconnected, and the retry then had to type into the console.
   //
   // Not in a game (already on the menu, or a connect that never landed): the
-  // bind is dead there, so the console is the only way in, and there is nothing
-  // on screen to hide.
+  // bind is dead there, so the console is the only way in.
   const inGame = gsiState.mapName !== null;
   const ok = inGame
-    ? await execCfgCommand(`disconnect; ${followUp}`)
+    ? await execCfgCommand(followUp)
     : await sendConsoleCommand(followUp);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
