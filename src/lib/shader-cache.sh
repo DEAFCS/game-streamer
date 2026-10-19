@@ -59,13 +59,13 @@ shader_cache_breakdown() {
 }
 
 # Steam's Fossilize Vulkan shader cache for cs2 (steamapps/shadercache/730).
-# This â€” NOT the NVIDIA GLCache (nvcache) â€” is where cs2's Vulkan pipelines come
+# This — NOT the NVIDIA GLCache (nvcache) — is where cs2's Vulkan pipelines come
 # from, and it persists on the node's library volume. Path-only.
 cs2_shadercache_dir() {
   printf '%s/steamapps/shadercache/730' "${STEAM_LIBRARY:-/mnt/game-streamer}"
 }
 
-# Current Fossilize cache occupancy in MiB (0 when missing) â€” for the warm-decision log.
+# Current Fossilize cache occupancy in MiB (0 when missing) — for the warm-decision log.
 cs2_shadercache_mib() {
   local d kib; d="$(cs2_shadercache_dir)"
   [ -d "$d" ] || { printf '0'; return; }
@@ -74,7 +74,7 @@ cs2_shadercache_mib() {
 }
 
 # True when the node already has a populated Fossilize cache, so we can skip the
-# one-time pre-warm. Heuristic: â‰¥50 MiB of compiled pipelines = warm; a cold/fresh
+# one-time pre-warm. Heuristic: ≥50 MiB of compiled pipelines = warm; a cold/fresh
 # node has the dir missing or near-empty. Override the floor with GS_SHADERCACHE_MIN_MIB.
 cs2_shadercache_populated() {
   local d; d="$(cs2_shadercache_dir)"
@@ -85,7 +85,7 @@ cs2_shadercache_populated() {
 
 # Whether to run the node shader pre-warm before a batch render. GS_WARM_SHADERS
 # overrides: 1/on=always, 0/off=never. Default (auto): warm only when the
-# Fossilize cache is cold â€” the first batch pod on a fresh node pays the one-time
+# Fossilize cache is cold — the first batch pod on a fresh node pays the one-time
 # ~60-90s; warmed nodes skip it. Fixes the cold-shader first-segment fps dip.
 should_warm_shaders() {
   case "${GS_WARM_SHADERS:-auto}" in
@@ -103,7 +103,7 @@ _parse_shader_line() {
   fi
 }
 
-# In-process throttle (single-process loop â†’ a global suffices, no bg
+# In-process throttle (single-process loop → a global suffices, no bg
 # monitor that could die and freeze the UI).
 _SHADER_LAST_REPORT=""
 _SHADER_LOG_OFFSET=0
@@ -128,7 +128,7 @@ shader_report_progress() {
   local f line parsed pct compiled total size
   f="$(shader_log_file)"
   [ -f "$f" ] || return 1
-  # Only this run's lines. If the file shrank, Steam rotated it â€” read all.
+  # Only this run's lines. If the file shrank, Steam rotated it — read all.
   size=$(stat -c %s "$f" 2>/dev/null || echo 0)
   [ "$size" -lt "${_SHADER_LOG_OFFSET:-0}" ] && _SHADER_LOG_OFFSET=0
   line=$(tail -c "+$(( ${_SHADER_LOG_OFFSET:-0} + 1 ))" "$f" 2>/dev/null \
@@ -170,10 +170,10 @@ shader_report_progress() {
 
 # Operator "skip shaders": stop Steam's fossilize_replay precompile workers so
 # the "Processing Vulkan shaders" step ends and cs2 launches. Deterministic and
-# display-independent â€” unlike poking the CEF dialog, which needs a keystroke to
+# display-independent — unlike poking the CEF dialog, which needs a keystroke to
 # land on the right focused button (Steam's dialog ignores keystrokes, and on
 # coexist nodes the Steam UI is black/unrenderable, so the poke can't work).
-# Returns 0 if it signalled at least one worker, else 1. Idempotent â€” called
+# Returns 0 if it signalled at least one worker, else 1. Idempotent — called
 # every loop while skip is requested; escalates TERM -> KILL across calls.
 skip_shader_compile() {
   pgrep -f fossilize_replay >/dev/null 2>&1 || return 1

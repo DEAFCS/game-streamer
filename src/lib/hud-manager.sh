@@ -17,10 +17,10 @@
 : "${HUD_OVERLAY_W:=${CS2_WIDTH:-1920}}"
 : "${HUD_OVERLAY_H:=${CS2_HEIGHT:-1080}}"
 # Initial HUD variant for the boot auto-overlay. The api stamps this
-# onto the pod as HUD_MODE (resolveHudMode â†’ default_hud_mode setting
-# â†’ "horizontal" fallback). We forward it to hud-manager as
+# onto the pod as HUD_MODE (resolveHudMode → default_hud_mode setting
+# → "horizontal" fallback). We forward it to hud-manager as
 # HUD_VARIANT so its auto-overlay-patch appends `?variant=...` to the
-# initial loadURL â€” no second window swap needed at boot. Operator
+# initial loadURL — no second window swap needed at boot. Operator
 # can still hot-swap mid-stream via /spec/hud-mode. Fallback to
 # "horizontal" because that's what the bundled default HUD's "default"
 # variant renders as (they're identical layouts).
@@ -32,7 +32,7 @@
 : "${HUD_BUNDLE_URL:=}"
 # Injected into the overlay window by auto-overlay.patch, which reads it from
 # disk at did-finish-load. Unset it to run without the camera overlay.
-: "${HUD_CAMERA_OVERLAY_JS:=}"  # DEAFCS: the camera overlay is not enabled (set a path to turn it on)
+: "${HUD_CAMERA_OVERLAY_JS:=}"  # DEAFCS: camera overlay not enabled (set a path to turn it on)
 # Where that overlay reaches the spec-server for the spectated player and the
 # WHEP proxy; it never holds the match credentials itself.
 : "${SPEC_BASE:=http://127.0.0.1:${SPEC_PORT:-1350}}"
@@ -54,7 +54,7 @@ start_picom() {
     picom_running && return 0
     sleep 0.2
   done
-  warn "picom didn't come up â€” HUD background won't be transparent"
+  warn "picom didn't come up — HUD background won't be transparent"
   return 1
 }
 
@@ -76,7 +76,7 @@ start_hud() {
     return 1
   fi
   # A hud-manager from a prior run (dev re-run in the same pod) may still be
-  # alive but with its :$HUD_PORT server wedged â€” that holds the port so a
+  # alive but with its :$HUD_PORT server wedged — that holds the port so a
   # fresh instance can't bind, and the old one never serves. Reuse it only if
   # it's actually serving; otherwise kill the stale one and start clean.
   if hud_running; then
@@ -89,13 +89,13 @@ start_hud() {
       hud_server_up && { log "hud-manager already running"; return 0; }
       sleep 1; i=$(( i + 1 ))
     done
-    warn "existing hud-manager not serving on :$HUD_PORT â€” restarting it"
+    warn "existing hud-manager not serving on :$HUD_PORT — restarting it"
     stop_hud; sleep 1
   fi
   mkdir -p "$HUD_USERDATA"
   log "starting hud-manager"
-  # HUD_AUTO_OVERLAY=1 â†’ auto-overlay.patch opens the bundled `default`
-  # HUD on app-ready. HUD_VARIANT="$HUD_MODE" â†’ the same patch appends
+  # HUD_AUTO_OVERLAY=1 → auto-overlay.patch opens the bundled `default`
+  # HUD on app-ready. HUD_VARIANT="$HUD_MODE" → the same patch appends
   # `?variant=<v>` so the initial layout matches the api-resolved
   # default. --mute-audio so HUD SFX don't leak into the captured
   # stream via the cs2 null sink.
@@ -113,7 +113,7 @@ start_hud() {
 }
 
 # Wait up to <timeout>s (default 60) for the server to bind. Returns 1 on
-# timeout or if the process exits â€” callers recover (restart) rather than
+# timeout or if the process exits — callers recover (restart) rather than
 # hang forever waiting on a wedged instance.
 wait_for_hud_server() {
   local timeout="${1:-60}"
@@ -210,7 +210,7 @@ position_hud_overlay() {
     id=$(find_hud_overlay_window)
     [ -n "$id" ] && break
     if ! hud_running; then
-      warn "hud-manager process died â€” restarting"
+      warn "hud-manager process died — restarting"
       stop_hud; sleep 1
       start_hud
       wait_for_hud_server 30 || warn "respawned hud-manager not responding"
@@ -283,7 +283,7 @@ write_gsi_cfg() {
 EOF
 }
 
-# Mirror in src/spectator/constants.mjs. BACKSPACE â†’ exec 5stack_exec
+# Mirror in src/spectator/constants.mjs. BACKSPACE → exec 5stack_exec
 # is the exec-cfg flush path used by spec-server's execCfgCommand; both
 # live and demo need it (e.g. /spec/scoreboard fires +/-showscores via
 # exec-cfg).
@@ -314,7 +314,7 @@ EOF
 }
 
 # Append per-player `bind "F<n>" "spec_player_by_accountid <id>"` to the
-# autoexec from the seeded match JSON, and emit the accountidâ†’keysym map
+# autoexec from the seeded match JSON, and emit the accountid→keysym map
 # spec-server reads at request time.
 write_spec_player_binds() {
   local match_json="$1" autoexec="$2" map_out="$3"
@@ -328,7 +328,7 @@ import json, sys
 
 match_json_path, autoexec_path, map_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# F6..F11 â€” 5v5 plus one sub. F12 is Steam's screenshot hotkey; binding
+# F6..F11 — 5v5 plus one sub. F12 is Steam's screenshot hotkey; binding
 # cs2 actions to it triggers a Steam screenshot.
 KEYS = [f"F{n}" for n in range(6, 12)]
 
@@ -378,7 +378,7 @@ PY
 }
 
 # Best-effort: GET match metadata from the 5stack api, then POST
-# translated objects to JTs Hud Manager's REST. Non-fatal â€” HUD still
+# translated objects to JTs Hud Manager's REST. Non-fatal — HUD still
 # runs with fallback GSI-provider names if this drifts.
 seed_hud_db() {
   local match_id="${1:?match id required}"
@@ -388,7 +388,7 @@ seed_hud_db() {
   local hdr=()
   [ -n "$API_TOKEN" ] && hdr=(-H "Authorization: Bearer $API_TOKEN")
 
-  # GET /hud-data/:id returns the curated shape we POST onward â€” pre-flattened
+  # GET /hud-data/:id returns the curated shape we POST onward — pre-flattened
   # lineups with absolute avatar/logo URLs. See
   # api/src/matches/game-streamer/hud-data.controller.ts:getMatchHudData.
   # Path is intentionally outside /matches/* so it stays off the public api
@@ -412,7 +412,7 @@ seed_hud_db() {
   # the HTTP POSTs below would otherwise spam "Connection refused" and
   # obscure real clip-render errors in the logs.
   if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
-    log "  CLIP_BATCH_MODE=1 â€” skipping hud-manager POSTs (json snapshot saved)"
+    log "  CLIP_BATCH_MODE=1 — skipping hud-manager POSTs (json snapshot saved)"
     return 0
   fi
 
@@ -568,7 +568,7 @@ for lu in lineups:
             })
 
 if len(team_ids) >= 2 and all(team_ids[:2]):
-    # spec-server owns halftime/OT swaps via reporters/sides.mjs â€” the
+    # spec-server owns halftime/OT swaps via reporters/sides.mjs — the
     # HUD's built-in autoSwitchSides was unreliable, so we drive it.
     put_json('/settings', {'autoSwitchSides': False})
 

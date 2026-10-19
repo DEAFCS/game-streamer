@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Posts streamer-pod status to the 5stack api. A background daemon owns
 # the latest-desired-state file; report_status updates it atomically;
-# the daemon's next loop POSTs whatever's newest. There is no queue â€”
+# the daemon's next loop POSTs whatever's newest. There is no queue —
 # intermediate states are dropped silently.
 #
 # POST ${STATUS_API_BASE}/game-streamer/${MATCH_ID}/status
@@ -42,7 +42,7 @@ fi
 : "${STATUS_BOOT_FILE:=$LOG_DIR/status.boot.epoch}"
 : "${STATUS_LAST_FILE:=$LOG_DIR/status.last}"
 
-# Auto-promote demo-session env to the override channel â€” whichever
+# Auto-promote demo-session env to the override channel — whichever
 # script starts the reporter first picks up the right wiring.
 _promote_demo_session_env() {
   if [ -z "$STATUS_REPORT_URL" ] && [ -n "${DEMO_SESSION_ID:-}" ]; then
@@ -168,7 +168,7 @@ broadcast_batch_error() {
 }
 
 # Fan boot-stage ticks out as {status: "booting", boot_stage,
-# boot_progress} â€” the api keeps row.status untouched.
+# boot_progress} — the api keeps row.status untouched.
 broadcast_batch_status() {
   _in_batch_broadcast_mode || return 0
   [ "$#" -gt 0 ]           || return 0
@@ -300,7 +300,7 @@ _status_daemon_loop() {
       current_hash=$(sha256sum <"$STATUS_STATE_FILE" 2>/dev/null | awk '{print $1}')
       if [ -n "$current_hash" ] && [ "$current_hash" != "$last_hash" ]; then
         body=$(cat "$STATUS_STATE_FILE")
-        # The HTTP code is the LAST line of curl's combined output â€”
+        # The HTTP code is the LAST line of curl's combined output —
         # curl writes stderr first, then -w on stdout.
         curl_stderr=$(curl -sS -m 5 -X POST \
             -H "x-origin-auth: ${auth}" \

@@ -73,14 +73,14 @@ restore_real_steamclient() {
 }
 
 # Register $lib as a Steam library so CS2 (installed there by steamcmd) is
-# recognized on boot â€” no interactive Install dialog, no re-download.
+# recognized on boot — no interactive Install dialog, no re-download.
 #
 # CRITICAL: Steam READS and rewrites $STEAM_HOME/steamapps/libraryfolders.vdf,
 # NOT $STEAM_HOME/config/libraryfolders.vdf. Proven via content_log.txt:
 #   "Loaded Steam library folders configuration: .../steam/steamapps/libraryfolders.vdf"
 # The long-standing bug seeded only config/, which Steam ignores, so on a fresh
-# (or reset) library $lib was never registered in the file Steam reads â†’ Steam
-# loaded "1 libraries", never loaded CS2 from $lib/steamapps â†’ "not installed".
+# (or reset) library $lib was never registered in the file Steam reads → Steam
+# loaded "1 libraries", never loaded CS2 from $lib/steamapps → "not installed".
 # Working pods only worked because Steam had adopted the library into the
 # steamapps/ copy long ago and it persisted. Seed BOTH copies (Steam keeps them
 # in sync once it adopts); the steamapps/ one is load-bearing.
@@ -144,7 +144,7 @@ EOF
       log "wrote fresh $lf with $lib (contentid $cid)"
       continue
     fi
-    # Match the exact path entry â€” "$lib" must not match "$lib/steam" (the home).
+    # Match the exact path entry — "$lib" must not match "$lib/steam" (the home).
     if grep -qE "\"path\"[[:space:]]*\"${lib}\"" "$lf"; then
       log "$lib already registered in $lf"
       continue
@@ -179,7 +179,7 @@ PY
 
 # Forwards steamcmd "Update state ... progress: X.YY" lines through
 # report_status; mirrors each throttled tick to stderr. Skips repeats
-# unless stage changes or % advances â‰¥1.0. set -o pipefail safe.
+# unless stage changes or % advances ≥1.0. set -o pipefail safe.
 _emit_cs2_progress_from_stdin() {
   local line stage pct last_stage="" last_pct="-1"
   while IFS= read -r line; do
@@ -205,7 +205,7 @@ _emit_cs2_progress_from_stdin() {
 #
 # Runs against $STEAM_LIBRARY (not the default ~/.local/share/Steam) by
 # passing +force_install_dir, so the install lands inside our registered
-# library folder and Steam picks it up on launch â€” no Install UI dialog.
+# library folder and Steam picks it up on launch — no Install UI dialog.
 #
 # Steam should be OFF when this runs (we kill it in setup-steam before
 # calling). steamcmd and Steam can clash on appmanifest writes otherwise.
@@ -222,7 +222,7 @@ install_cs2_via_steamcmd() {
 
   if ! command -v /opt/steamcmd/steamcmd.sh >/dev/null 2>&1 \
        && [ ! -x /opt/steamcmd/steamcmd.sh ]; then
-    die "steamcmd not found at /opt/steamcmd/steamcmd.sh â€” image needs the steamcmd install layer"
+    die "steamcmd not found at /opt/steamcmd/steamcmd.sh — image needs the steamcmd install layer"
   fi
 
   report_status status=downloading_cs2
@@ -232,7 +232,7 @@ install_cs2_via_steamcmd() {
   mkdir -p "$CS2_DIR"
 
   # Capture the steamcmd transcript so we can pattern-match failures
-  # below â€” auth errors come out on stdout (e.g. "ERROR (Invalid
+  # below — auth errors come out on stdout (e.g. "ERROR (Invalid
   # Password)") and we want to surface them as a specific operator-
   # actionable message via report_status, not the generic "no
   # appmanifest" fallthrough. `tee` keeps the live log in k8s stdout
@@ -240,7 +240,7 @@ install_cs2_via_steamcmd() {
   local steamcmd_log="$LOG_DIR/steamcmd-cs2-install.log"
   : > "$steamcmd_log"
 
-  # Call steamcmd.sh directly â€” the /usr/local/bin/steamcmd shim resolves
+  # Call steamcmd.sh directly — the /usr/local/bin/steamcmd shim resolves
   # its own dir wrong via symlink and can't find linux32/. The trailing
   # _emit_cs2_progress_from_stdin pipe stage forwards live download
   # progress to the API; tee keeps the full transcript for the post-exit
@@ -265,7 +265,7 @@ install_cs2_via_steamcmd() {
   if [ -f "$manifest" ]; then
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
-    log "CS2 install OK â€” ${bid:-buildid unknown}"
+    log "CS2 install OK — ${bid:-buildid unknown}"
     # Re-register: steamcmd rewrote libraryfolders.vdf, dropping the pre-install entry.
     register_library "$STEAM_LIBRARY"
     return 0
@@ -275,21 +275,21 @@ install_cs2_via_steamcmd() {
   # so the match_streams row gets a message the operator can act on
   # ("verify steam username and password") rather than the generic
   # "install failed". Pattern list mirrors the EResult strings
-  # steamcmd prints â€” extend as new failure modes show up in the wild.
+  # steamcmd prints — extend as new failure modes show up in the wild.
   if grep -qE 'ERROR \(Invalid Password\)|FAILED login.*Invalid Password|FAILED \(Invalid Password\)' "$steamcmd_log"; then
-    die "Steam login rejected â€” verify STEAM_USER and STEAM_PASSWORD on the API are correct for the streamer Steam account."
+    die "Steam login rejected — verify STEAM_USER and STEAM_PASSWORD on the API are correct for the streamer Steam account."
   fi
   if grep -qE 'Account Logon Denied|Account Login Denied Need Two Factor|RateLimitExceeded|Rate Limit Exceeded' "$steamcmd_log"; then
-    die "Steam login blocked by Steam Guard / rate limit â€” disable Steam Guard on the streamer Steam account or wait a few minutes and retry."
+    die "Steam login blocked by Steam Guard / rate limit — disable Steam Guard on the streamer Steam account or wait a few minutes and retry."
   fi
   if grep -qE 'No subscription|No license' "$steamcmd_log"; then
-    die "Steam account lacks a CS2 license â€” the streamer Steam account must own (or have a free license for) CS2 (appid 730)."
+    die "Steam account lacks a CS2 license — the streamer Steam account must own (or have a free license for) CS2 (appid 730)."
   fi
   if grep -qE 'No space left on device|Disk write failure|ENOSPC|insufficient.*disk space' "$steamcmd_log"; then
-    die "steamcmd failed: out of disk space on the streamer PVC (\$STEAM_LIBRARY=$STEAM_LIBRARY) â€” resize or evict cached games."
+    die "steamcmd failed: out of disk space on the streamer PVC (\$STEAM_LIBRARY=$STEAM_LIBRARY) — resize or evict cached games."
   fi
   if grep -qE 'Connection reset by peer|Failed to receive any data, quitting now|Could not connect to Steam network|Connecting anonymously to Steam Public.*FAILED|Connection to Steam servers lost' "$steamcmd_log"; then
-    die "steamcmd lost connection to Steam servers â€” usually transient, the pod will retry on restart. Last log lines: $(_steamcmd_log_tail "$steamcmd_log")"
+    die "steamcmd lost connection to Steam servers — usually transient, the pod will retry on restart. Last log lines: $(_steamcmd_log_tail "$steamcmd_log")"
   fi
   local appstate_line
   appstate_line=$(grep -E 'ERROR! ?(App|Update) .*(state|failed)|Failed to install app|Update failed' "$steamcmd_log" | tail -1 || true)
@@ -297,75 +297,7 @@ install_cs2_via_steamcmd() {
     die "steamcmd install failed: ${appstate_line}"
   fi
 
-  die "steamcmd finished but no $manifest â€” install failed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
-}
-
-# Bring an existing CS2 install up to date via steamcmd BEFORE Steam
-# boots. Steam refuses -applaunch on an out-of-date app and its own
-# "CS2 must be updated" flow sometimes wedges, so updating here (Steam
-# off) means the client sees a current install and launches straight
-# away. No `validate` — that re-hashes ~57 GB; steamcmd's buildid check
-# is a fast no-op when current. Non-fatal on failure: warn and let
-# Steam's own updater try, i.e. the pre-existing behaviour.
-# CS2_UPDATE_ON_BOOT=0 restores the old skip-if-installed behaviour.
-update_cs2_via_steamcmd() {
-  local manifest="${1:?manifest path required}"
-
-  if [ "${CS2_UPDATE_ON_BOOT:-1}" != "1" ]; then
-    log "CS2_UPDATE_ON_BOOT=0 — skipping CS2 update check"
-    return 0
-  fi
-  if [ ! -x /opt/steamcmd/steamcmd.sh ]; then
-    warn "steamcmd missing — skipping CS2 update check (Steam will self-update)"
-    return 0
-  fi
-
-  local old_bid
-  old_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
-    | grep -oE '[0-9]+' | head -1 || true)
-  log "CS2 installed (buildid ${old_bid:-unknown}) — running steamcmd update check"
-
-  # steamcmd expects the manifest inside the install dir (we lift it to
-  # the library root post-install for Steam). Seed a copy so it sees the
-  # installed state and downloads only the delta — without it steamcmd
-  # treats the install as missing and redownloads everything.
-  mkdir -p "$CS2_DIR/steamapps"
-  cp -f "$manifest" "$CS2_DIR/steamapps/appmanifest_730.acf"
-
-  local steamcmd_log="$LOG_DIR/steamcmd-cs2-update.log"
-  : > "$steamcmd_log"
-  /opt/steamcmd/steamcmd.sh \
-    +@sSteamCmdForcePlatformType linux \
-    +force_install_dir "$CS2_DIR" \
-    +login "$STEAM_USER" "$STEAM_PASSWORD" \
-    +app_update 730 \
-    +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
-
-  if ! grep -qE "Success! App '730' (fully installed|already up to date)" "$steamcmd_log"; then
-    warn "steamcmd update pass did not confirm success — continuing; Steam will self-update if needed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
-    return 0
-  fi
-
-  # Lift the (possibly updated) manifest back to the library root, same
-  # as the fresh-install path.
-  if [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
-    mv -f "$CS2_DIR/steamapps/appmanifest_730.acf" "$manifest"
-    rmdir "$CS2_DIR/steamapps" 2>/dev/null || true
-    sed -i 's|"installdir"[[:space:]]*"[^"]*"|"installdir"\t\t"Counter-Strike Global Offensive"|' \
-      "$manifest"
-  fi
-
-  local new_bid
-  new_bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" \
-    | grep -oE '[0-9]+' | head -1 || true)
-  if [ -n "$new_bid" ] && [ "$new_bid" != "$old_bid" ]; then
-    log "CS2 updated: buildid ${old_bid:-unknown} -> $new_bid"
-  else
-    log "CS2 already up to date (buildid ${new_bid:-${old_bid:-unknown}})"
-  fi
-
-  # steamcmd can rewrite libraryfolders.vdf — re-register ours (idempotent).
-  register_library "$STEAM_LIBRARY"
+  die "steamcmd finished but no $manifest — install failed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
 }
 
 # Bring an existing CS2 install up to date via steamcmd BEFORE Steam
@@ -455,7 +387,7 @@ _steamcmd_log_tail() {
 
 # Pre-download a CS2 workshop map via steamcmd. Without this, +playdemo
 # on a workshop map stalls CS2 on a "Subscribe?" prompt and the demo
-# never starts. Idempotent â€” steamcmd skips if the .vpk is already on
+# never starts. Idempotent — steamcmd skips if the .vpk is already on
 # disk at the expected path.
 #
 #   $1  workshop item id (numeric, from the demo header `workshop/<id>/...`)
@@ -463,15 +395,15 @@ download_workshop_map() {
   local id="${1:?workshop id required}"
 
   # steamcmd writes to $STEAM_LIBRARY/steamapps/workshop/content/730/<id>/.
-  # CS2 looks there at runtime â€” no extra symlink required.
+  # CS2 looks there at runtime — no extra symlink required.
   local target="$STEAM_LIBRARY/steamapps/workshop/content/730/${id}"
   if compgen -G "$target/*.vpk" >/dev/null 2>&1; then
-    log "workshop map ${id} already present at $target â€” skip download"
+    log "workshop map ${id} already present at $target — skip download"
     return 0
   fi
 
   if [ ! -x /opt/steamcmd/steamcmd.sh ]; then
-    warn "steamcmd missing â€” cannot pre-download workshop map ${id}"
+    warn "steamcmd missing — cannot pre-download workshop map ${id}"
     return 1
   fi
 
@@ -501,7 +433,7 @@ download_workshop_map() {
 
 # Set Steam Cloud sync to OFF for CS2 (appid 730) in every user's
 # localconfig.vdf. CS2's "Cloud Out of Date" / "Play anyway" prompt is a
-# CEF dialog with no X11 title â€” xdotool can't reliably target it â€” so we
+# CEF dialog with no X11 title — xdotool can't reliably target it — so we
 # stop it from firing in the first place.
 #
 # Steam rewrites localconfig.vdf on shutdown, so this is a no-op while
@@ -519,7 +451,7 @@ cfg_path, appid = sys.argv[1], sys.argv[2]
 p = pathlib.Path(cfg_path)
 src = p.read_text()
 
-# Case 1: existing <appid> block â€” flip or insert cloudenabled inside.
+# Case 1: existing <appid> block — flip or insert cloudenabled inside.
 pat = re.compile(r'(^|\n)([ \t]*)"' + re.escape(appid) + r'"[ \t\r\n]*\{', re.MULTILINE)
 m = pat.search(src)
 if m:
@@ -530,7 +462,7 @@ if m:
         elif src[i] == '}': depth -= 1
         i += 1
     if depth != 0:
-        print(f"  {cfg_path}: unbalanced braces â€” refusing to edit")
+        print(f"  {cfg_path}: unbalanced braces — refusing to edit")
         sys.exit(1)
     brace_close = i - 1
     block = src[brace_open + 1:brace_close]
@@ -552,7 +484,7 @@ if m:
         print(f"  {cfg_path}: inserted CloudEnabled=0 in existing {appid} block")
     sys.exit(0)
 
-# Case 2: existing "apps" block â€” insert <appid> block inside.
+# Case 2: existing "apps" block — insert <appid> block inside.
 apps = re.search(r'(\n[ \t]*)"apps"[ \t\r\n]*\{', src)
 if apps:
     indent = apps.group(1).rstrip("\n")
@@ -564,7 +496,7 @@ if apps:
     print(f"  {cfg_path}: inserted new {appid} block with CloudEnabled=0")
     sys.exit(0)
 
-# Case 3: no "apps" block at all â€” synthesize the whole structure under
+# Case 3: no "apps" block at all — synthesize the whole structure under
 # the Steam block. sharedconfig.vdf is nearly empty before the first
 # CS2 launch.
 def find_block_open(src, key, start=0):
@@ -575,13 +507,13 @@ def find_block_open(src, key, start=0):
 
 sw = find_block_open(src, "Software")
 if sw == -1:
-    print(f"  {cfg_path}: no Software block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Software block — leaving untouched"); sys.exit(0)
 valve = find_block_open(src, "Valve", sw)
 if valve == -1:
-    print(f"  {cfg_path}: no Valve block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Valve block — leaving untouched"); sys.exit(0)
 steam = find_block_open(src, "Steam", valve)
 if steam == -1:
-    print(f"  {cfg_path}: no Steam block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Steam block — leaving untouched"); sys.exit(0)
 
 # Pull the indent of the "Steam" line so the new block matches the file's style.
 sm = re.search(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src[:steam])
@@ -626,7 +558,7 @@ PY
 }
 
 # True if the login account still has CS2 cloud on (leftover 730 ledger, or no
-# CloudEnabled=0 in its localconfig). Unknown id â†’ dirty.
+# CloudEnabled=0 in its localconfig). Unknown id → dirty.
 cs2_cloud_dirty_for_active() {
   local aid lc
   aid=$(active_steam_accountid 2>/dev/null) || return 0
@@ -634,8 +566,8 @@ cs2_cloud_dirty_for_active() {
   [ -e "$STEAM_HOME/userdata/$aid/730/remotecache.vdf" ] && return 0
   lc="$STEAM_HOME/userdata/$aid/config/localconfig.vdf"
   [ -f "$lc" ] || return 0
-  # CloudEnabled "0" anywhere in the apps/730 block â†’ clean. (Coarse 40-line
-  # window after the "730" key; good enough â€” the block is small.)
+  # CloudEnabled "0" anywhere in the apps/730 block → clean. (Coarse 40-line
+  # window after the "730" key; good enough — the block is small.)
   if grep -A40 '"730"' "$lc" 2>/dev/null | grep -qiE '"CloudEnabled"[[:space:]]+"0"'; then
     return 1
   fi
@@ -643,8 +575,8 @@ cs2_cloud_dirty_for_active() {
 }
 
 # Set Steam Cloud sync to OFF for CS2 in every user's per-account VDFs:
-#   localconfig.vdf  â€” local-only (rewritten on Steam shutdown)
-#   sharedconfig.vdf â€” synced across PCs (under userdata/<id>/7/remote)
+#   localconfig.vdf  — local-only (rewritten on Steam shutdown)
+#   sharedconfig.vdf — synced across PCs (under userdata/<id>/7/remote)
 # Also auto-discovers all SteamIDs (numeric subdirs of userdata/) so we
 # don't need to know the SteamID up front.
 #
@@ -652,11 +584,11 @@ cs2_cloud_dirty_for_active() {
 # running. Call BEFORE start_steam.
 disable_cs2_cloud() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "disable_cs2_cloud: Steam is running â€” skip (would be clobbered on shutdown)"
+    log "disable_cs2_cloud: Steam is running — skip (would be clobbered on shutdown)"
     return 0
   fi
 
-  # Both common userdata paths â€” ~/.steam/steam is normally a symlink
+  # Both common userdata paths — ~/.steam/steam is normally a symlink
   # into ~/.local/share/Steam, but if it's been replaced with a real
   # dir we want to catch that too.
   local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
@@ -686,7 +618,7 @@ disable_cs2_cloud() {
     shopt -u nullglob
   done
 
-  [ "$edited" = 0 ] && log "disable_cs2_cloud: no userdata SteamIDs found yet â€” skip"
+  [ "$edited" = 0 ] && log "disable_cs2_cloud: no userdata SteamIDs found yet — skip"
   return 0
 }
 
@@ -695,7 +627,7 @@ disable_cs2_cloud() {
 #   InstallConfigStore/Software/Valve/Steam/Cloud/EnableCloud = 0
 disable_cloud_in_config_vdf() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "disable_cloud_in_config_vdf: Steam is running â€” skip"
+    log "disable_cloud_in_config_vdf: Steam is running — skip"
     return 0
   fi
   local f
@@ -707,7 +639,7 @@ import re, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 src = p.read_text()
 
-# 1) Existing EnableCloud â€” flip its value.
+# 1) Existing EnableCloud — flip its value.
 m = re.search(r'"EnableCloud"[ \t\r\n]+"([^"]*)"', src)
 if m:
     if m.group(1) == "0":
@@ -721,7 +653,7 @@ if m:
     print(f"  flipped EnableCloud to 0 in {p}")
     sys.exit(0)
 
-# 2) Existing Cloud { ... } block â€” inject EnableCloud into it.
+# 2) Existing Cloud { ... } block — inject EnableCloud into it.
 m = re.search(r'"Cloud"[ \t\r\n]*\{', src)
 if m:
     p.write_text(src[:m.end()] + '\n\t\t\t\t\t"EnableCloud"\t\t"0"' + src[m.end():])
@@ -736,7 +668,7 @@ def find_block_open(src, key, start=0):
 
 ics = find_block_open(src, "InstallConfigStore")
 if ics == -1:
-    print(f"  no InstallConfigStore in {p} â€” skip"); sys.exit(0)
+    print(f"  no InstallConfigStore in {p} — skip"); sys.exit(0)
 sw = find_block_open(src, "Software", ics)
 if sw == -1: print(f"  no Software in {p}"); sys.exit(0)
 v = find_block_open(src, "Valve", sw)
@@ -753,14 +685,14 @@ PY
 
 # Disable Steam Cloud globally by editing registry.vdf
 # (HKCU/Software/Valve/Steam/CloudEnabled = 0). This is the SAME setting
-# the Steam UI exposes as "Settings â†’ Cloud â†’ Enable Steam Cloud sync".
-# Per-app cloudenabled in localconfig.vdf isn't always sufficient â€” the
+# the Steam UI exposes as "Settings → Cloud → Enable Steam Cloud sync".
+# Per-app cloudenabled in localconfig.vdf isn't always sufficient — the
 # global flag is the reliable kill switch for the "Cloud Out of Date" dialog.
 #
 # Steam rewrites registry.vdf on shutdown; call BEFORE start_steam.
 disable_cloud_globally() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "disable_cloud_globally: Steam is running â€” skip (would be clobbered on shutdown)"
+    log "disable_cloud_globally: Steam is running — skip (would be clobbered on shutdown)"
     return 0
   fi
   local f
@@ -797,7 +729,7 @@ hkcu = find_block_open(src, "HKCU")
 if hkcu == -1:
     hkcu = find_block_open(src, "HKEY_CURRENT_USER")
 if hkcu == -1:
-    print(f"  no HKCU block in {p} â€” leaving untouched")
+    print(f"  no HKCU block in {p} — leaving untouched")
     sys.exit(1)
 sw = find_block_open(src, "Software", hkcu)
 if sw == -1:
@@ -818,15 +750,15 @@ PY
 
 # Disable the Steam in-game overlay globally by editing registry.vdf
 # (HKCU/Software/Valve/Steam/EnableGameOverlay = 0). Same toggle as the
-# Steam UI's Settings â†’ In-Game â†’ "Enable the Steam Overlay while
+# Steam UI's Settings → In-Game → "Enable the Steam Overlay while
 # in-game". Without this, Steam can pop the overlay over cs2 mid-match
-# (Shift+Tab, friend invites, achievement toasts) and steal focus â€”
+# (Shift+Tab, friend invites, achievement toasts) and steal focus —
 # we'd capture the overlay instead of the game.
 #
 # Steam rewrites registry.vdf on shutdown; call BEFORE start_steam.
 disable_overlay_globally() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "disable_overlay_globally: Steam is running â€” skip (would be clobbered on shutdown)"
+    log "disable_overlay_globally: Steam is running — skip (would be clobbered on shutdown)"
     return 0
   fi
   local f
@@ -861,7 +793,7 @@ hkcu = find_block_open(src, "HKCU")
 if hkcu == -1:
     hkcu = find_block_open(src, "HKEY_CURRENT_USER")
 if hkcu == -1:
-    print(f"  no HKCU block in {p} â€” leaving untouched")
+    print(f"  no HKCU block in {p} — leaving untouched")
     sys.exit(1)
 sw = find_block_open(src, "Software", hkcu)
 if sw == -1:
@@ -903,7 +835,7 @@ if m:
         elif src[i] == '}': depth -= 1
         i += 1
     if depth != 0:
-        print(f"  {cfg_path}: unbalanced braces â€” refusing to edit")
+        print(f"  {cfg_path}: unbalanced braces — refusing to edit")
         sys.exit(1)
     brace_close = i - 1
     block = src[brace_open + 1:brace_close]
@@ -941,13 +873,13 @@ def find_block_open(src, key, start=0):
 
 sw = find_block_open(src, "Software")
 if sw == -1:
-    print(f"  {cfg_path}: no Software block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Software block — leaving untouched"); sys.exit(0)
 valve = find_block_open(src, "Valve", sw)
 if valve == -1:
-    print(f"  {cfg_path}: no Valve block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Valve block — leaving untouched"); sys.exit(0)
 steam = find_block_open(src, "Steam", valve)
 if steam == -1:
-    print(f"  {cfg_path}: no Steam block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Steam block — leaving untouched"); sys.exit(0)
 
 sm = re.search(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src[:steam])
 steam_indent = sm.group(2) if sm else "\t\t\t"
@@ -965,11 +897,11 @@ PY
 }
 
 # Disable Steam overlay for CS2 in every user's localconfig.vdf. Mirrors
-# disable_cs2_cloud â€” Steam clobbers localconfig.vdf on shutdown, so
+# disable_cs2_cloud — Steam clobbers localconfig.vdf on shutdown, so
 # this is a no-op while Steam is running. Call BEFORE start_steam.
 disable_cs2_overlay() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "disable_cs2_overlay: Steam is running â€” skip (would be clobbered on shutdown)"
+    log "disable_cs2_overlay: Steam is running — skip (would be clobbered on shutdown)"
     return 0
   fi
 
@@ -994,7 +926,7 @@ disable_cs2_overlay() {
     shopt -u nullglob
   done
 
-  [ "$edited" = 0 ] && log "disable_cs2_overlay: no userdata SteamIDs found yet â€” skip"
+  [ "$edited" = 0 ] && log "disable_cs2_overlay: no userdata SteamIDs found yet — skip"
   return 0
 }
 
@@ -1023,7 +955,7 @@ if m:
         elif src[i] == '}': depth -= 1
         i += 1
     if depth != 0:
-        print(f"  {cfg_path}: unbalanced braces â€” refusing to edit")
+        print(f"  {cfg_path}: unbalanced braces — refusing to edit")
         sys.exit(1)
     brace_close = i - 1
     block = src[brace_open + 1:brace_close]
@@ -1060,13 +992,13 @@ def find_block_open(src, key, start=0):
 
 sw = find_block_open(src, "Software")
 if sw == -1:
-    print(f"  {cfg_path}: no Software block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Software block — leaving untouched"); sys.exit(0)
 valve = find_block_open(src, "Valve", sw)
 if valve == -1:
-    print(f"  {cfg_path}: no Valve block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Valve block — leaving untouched"); sys.exit(0)
 steam = find_block_open(src, "Steam", valve)
 if steam == -1:
-    print(f"  {cfg_path}: no Steam block â€” leaving untouched"); sys.exit(0)
+    print(f"  {cfg_path}: no Steam block — leaving untouched"); sys.exit(0)
 
 sm = re.search(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src[:steam])
 steam_indent = sm.group(2) if sm else "\t\t\t"
@@ -1085,21 +1017,21 @@ PY
 # Force `__GL_SHADER_DISK_CACHE=1` onto the cs2 process via its Steam launch
 # options. WHY: cs2 uses Vulkan; the NVIDIA driver DISABLES the writable shader
 # disk cache when running as root unless that env var is set, so runtime-
-# compiled pipelines (e.g. the molotov fire shader) recompile every render â€”
+# compiled pipelines (e.g. the molotov fire shader) recompile every render —
 # a fixed-spot stutter. Steam manages the __GL_SHADER_DISK_CACHE_* env itself
 # and strips our exported enable flag, so exporting it before -applaunch
 # doesn't stick; launch options (`VAR=1 %command%`) ARE applied to the final
-# game process and survive. Steam clobbers localconfig.vdf on shutdown, so â€”
-# like disable_cs2_overlay â€” this must run while Steam is OFF.
+# game process and survive. Steam clobbers localconfig.vdf on shutdown, so —
+# like disable_cs2_overlay — this must run while Steam is OFF.
 set_cs2_launch_options() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "set_cs2_launch_options: Steam is running â€” skip (would be clobbered on shutdown)"
+    log "set_cs2_launch_options: Steam is running — skip (would be clobbered on shutdown)"
     return 0
   fi
   # Env prepended to %command%: the shader-cache flag always, plus OBS_VKCAPTURE=1
   # when CLIP rendering uses the Vulkan present-hook (CLIP_CAPTURE_METHOD=vkcapture,
   # the default). The layer also loads in live cs2 but is unused there (live
-  # captures cs2+HUD via ximagesrc) â€” harmless. Steam strips exported env before
+  # captures cs2+HUD via ximagesrc) — harmless. Steam strips exported env before
   # -applaunch, so the obs-vkcapture implicit Vulkan layer can ONLY be enabled here.
   local cap_env=""
   case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
@@ -1128,15 +1060,15 @@ set_cs2_launch_options() {
     done
     shopt -u nullglob
   done
-  [ "$edited" = 0 ] && log "set_cs2_launch_options: no userdata SteamIDs found yet â€” skip"
+  [ "$edited" = 0 ] && log "set_cs2_launch_options: no userdata SteamIDs found yet — skip"
   return 0
 }
 
 # The per-app `OverlayAppEnabled=0` only suppresses the overlay panel
-# inside cs2 â€” Steam still spawns GameOverlayUI and pops the "Press
+# inside cs2 — Steam still spawns GameOverlayUI and pops the "Press
 # Shift+Tab to begin" first-run toast over the captured stream. The
 # master switch is `system.EnableGameOverlay` in localconfig.vdf
-# (mirrors Settings â†’ In-Game â†’ "Enable the Steam Overlay while
+# (mirrors Settings → In-Game → "Enable the Steam Overlay while
 # in-game"). With this flipped to 0, GameOverlayUI never spawns and
 # the toast never appears.
 _vdf_disable_overlay_system() {
@@ -1158,7 +1090,7 @@ if sm:
         elif src[i] == '}': depth -= 1
         i += 1
     if depth != 0:
-        print(f"  {p}: unbalanced braces in system block â€” refusing to edit")
+        print(f"  {p}: unbalanced braces in system block — refusing to edit")
         sys.exit(1)
     brace_close = i - 1
     block = src[brace_open + 1:brace_close]
@@ -1178,10 +1110,10 @@ if sm:
         print(f"  {p}: inserted system.EnableGameOverlay=0")
     sys.exit(0)
 
-# No system block â€” synthesize one at the top-level.
+# No system block — synthesize one at the top-level.
 root = re.match(r'\s*"UserLocalConfigStore"[ \t\r\n]*\{', src)
 if not root:
-    print(f"  {p}: no UserLocalConfigStore root â€” leaving untouched")
+    print(f"  {p}: no UserLocalConfigStore root — leaving untouched")
     sys.exit(0)
 insertion = '\n\t"system"\n\t{\n\t\t"EnableGameOverlay"\t\t"0"\n\t}'
 p.write_text(src[:root.end()] + insertion + src[root.end():])
@@ -1319,12 +1251,12 @@ PY
 # filtered to "cloud" lines. Use this to confirm whether our edits stuck
 # and whether Steam saw them.
 
-# Comprehensive diagnostic dump â€” everything we need to figure out why
+# Comprehensive diagnostic dump — everything we need to figure out why
 # Steam isn't behaving. One command, all signals.
 
 # Make $STEAM_HOME a symlink into the cache mount so state persists
 # across pod restarts without a second bind mount (which causes EXDEV
-# on Steam self-update â€” see fix_steam_perms). Single filesystem means
+# on Steam self-update — see fix_steam_perms). Single filesystem means
 # rename(2) always succeeds. On first run we migrate any pre-existing
 # $STEAM_HOME content; if both sides have content, the persisted cache
 # wins.
@@ -1385,7 +1317,7 @@ write_steam_dev_cfg() {
 
 fix_steam_perms() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "fix_steam_perms: Steam is running â€” skip"
+    log "fix_steam_perms: Steam is running — skip"
     return 0
   fi
 
@@ -1397,7 +1329,7 @@ fix_steam_perms() {
   #   BCommitUpdatedFiles: failed to rename ... (error 18)
   #   Failed to apply update, reverting...
   #   dlmopen steamui.so failed: ... no such file
-  # â€” Steam exits before webhelper spawns. Removing the symlink lets Steam
+  # — Steam exits before webhelper spawns. Removing the symlink lets Steam
   # create ./steam/ as a real subdir on the same mount, so renames work.
   if [ -L "$STEAM_HOME/steam" ]; then
     log "fix_steam_perms: removing legacy $STEAM_HOME/steam symlink (-> $(readlink "$STEAM_HOME/steam"))"
@@ -1405,17 +1337,17 @@ fix_steam_perms() {
   fi
 
   # Steam's update working area. Two distinct things live under package/:
-  #   * package/steam_client_ubuntu12_*.zip + .manifest â€” completed,
+  #   * package/steam_client_ubuntu12_*.zip + .manifest — completed,
   #     immutable downloads from the client-update CDN. Safe to keep
   #     across crashes; reusing them lets Steam skip a ~45s redownload.
-  #   * package/tmp/                                    â€” half-extracted
+  #   * package/tmp/                                    — half-extracted
   #     staging area for an in-progress update. If the prior process
   #     died mid-rename this can be inconsistent and will corrupt the
   #     next update attempt.
   #
   # Pods in our deployment get SIGKILL'd on stop, so Steam never exits
   # cleanly and a `.crash` marker shows up on every restart. That makes
-  # `.crash` an unreliable signal of update corruption â€” wiping the
+  # `.crash` an unreliable signal of update corruption — wiping the
   # whole package/ on every boot would force a redownload on every
   # cold-ish start. Only `package/tmp/` presence is a direct, reliable
   # signal of a half-applied update; nuke just that.
@@ -1424,11 +1356,11 @@ fix_steam_perms() {
   # manual escape hatch when a download is genuinely corrupt.
   if [ "${FORCE_PACKAGE_RESET:-0}" = "1" ]; then
     if [ -e "$STEAM_HOME/package" ]; then
-      log "fix_steam_perms: FORCE_PACKAGE_RESET=1 â€” removing $STEAM_HOME/package"
+      log "fix_steam_perms: FORCE_PACKAGE_RESET=1 — removing $STEAM_HOME/package"
       rm -rf "$STEAM_HOME/package"
     fi
   elif [ -e "$STEAM_HOME/package/tmp" ]; then
-    log "fix_steam_perms: package/tmp present â€” removing only $STEAM_HOME/package/tmp (cache preserved)"
+    log "fix_steam_perms: package/tmp present — removing only $STEAM_HOME/package/tmp (cache preserved)"
     rm -rf "$STEAM_HOME/package/tmp"
   fi
 
@@ -1440,20 +1372,20 @@ fix_steam_perms() {
 
   # Normalize ownership across the ENTIRE Steam home. Slow on warm
   # boots (recurses ~10k files in the cache mount) but only matters
-  # the FIRST time a fresh host volume is mounted â€” once everything
+  # the FIRST time a fresh host volume is mounted — once everything
   # is root:root, subsequent boots can skip. Marker file `.perms-ok`
   # records that we've done it. Bypass the skip by removing the
   # marker or setting FORCE_FIX_STEAM_PERMS=1.
   #
   # IMPORTANT: -H. Without it, $STEAM_HOME (a symlink to the cache
-  # mount) is NOT traversed â€” we'd be no-op'ing on the symlink itself
+  # mount) is NOT traversed — we'd be no-op'ing on the symlink itself
   # and never touching the contents. With -H, chown follows
   # command-line symlinks for the recursion. Same for chmod.
   # CS2_DIR is on a separate path ($STEAM_LIBRARY/steamapps/...), not
-  # affected â€” and it's 60GB so we wouldn't want to chown it anyway.
+  # affected — and it's 60GB so we wouldn't want to chown it anyway.
   local perms_marker="$STEAM_HOME/.perms-ok"
   if [ "${FORCE_FIX_STEAM_PERMS:-0}" != "1" ] && [ -f "$perms_marker" ]; then
-    log "fix_steam_perms: marker present at $perms_marker â€” skip chown/chmod"
+    log "fix_steam_perms: marker present at $perms_marker — skip chown/chmod"
   else
     log "fix_steam_perms: chown -RH root:root + chmod -RH u+rwX on $STEAM_HOME"
     chown -RH root:root "$STEAM_HOME" 2>/dev/null || true
@@ -1530,9 +1462,9 @@ start_steam() {
   #   -nochatui       skip Chat UI initialisation
   #   -no-browser     skip the in-Steam web browser
   #
-  # All three are community-known and safe â€” they don't affect the
+  # All three are community-known and safe — they don't affect the
   # webhelper paths +applaunch goes through. We deliberately do NOT
-  # use -silent (tested earlier â€” it suppresses the webhelper subset
+  # use -silent (tested earlier — it suppresses the webhelper subset
   # that handles +applaunch and cs2 never spawned).
   #
   # Override with STEAM_LAUNCH_FLAGS="" to fall back to a vanilla
@@ -1552,13 +1484,13 @@ start_steam() {
 
 # Wait for Steam to finish login by polling for the userdata
 # directory. With `-silent` no window ever appears, so we can't proxy
-# the "logged in" signal off window visibility â€” userdata/<steamid>/
+# the "logged in" signal off window visibility — userdata/<steamid>/
 # is what actually indicates a completed login + roaming-config sync.
 #
 # On warm boots (HAD_USERDATA=1) this returns immediately. On cold
 # first-boots it takes 30-60s (steamwebhelper has to fetch + sync).
 wait_for_steam_userdata() {
-  # Waits indefinitely â€” operator cancels by closing the popup.
+  # Waits indefinitely — operator cancels by closing the popup.
   # "timeout" arg accepted for callsite compatibility, treated as
   # no-op.
   log "waiting for steam userdata (login + roaming config)"
@@ -1579,7 +1511,7 @@ wait_for_steam_userdata() {
   done
 }
 
-# Wait for Steam IPC to come up. Waits indefinitely â€” operator
+# Wait for Steam IPC to come up. Waits indefinitely — operator
 # cancels by closing the popup window (which drops the WS, which
 # tells the api to delete the pod). No need for a self-imposed
 # timeout that just bricks the pod with no recovery path.
@@ -1650,7 +1582,7 @@ validate_report_progress() {
   esac
 }
 
-# True if the FRESH (boot-wiped) cloud_log shows a 730 conflict â€” the "Cloud Out
+# True if the FRESH (boot-wiped) cloud_log shows a 730 conflict — the "Cloud Out
 # of Date" trigger. Log is wiped on boot, so any hit is this run (not stale).
 cloud_conflict_active() {
   local f="${STEAM_HOME:-/root/.local/share/Steam}/logs/cloud_log.txt"
@@ -1663,7 +1595,7 @@ cloud_conflict_active() {
 # wait_for_cs2_process <applaunch_fn>
 #
 # Block until a /linuxsteamrt64/cs2 process appears, then set CS2_PID.
-# Waits indefinitely â€” a cold shader compile can take a long time, so we
+# Waits indefinitely — a cold shader compile can take a long time, so we
 # never time out / die (operator cancels via pod delete).
 #
 # Side effects on each iteration:
@@ -1704,7 +1636,7 @@ wait_for_cs2_process() {
   declare -F shader_progress_reset >/dev/null 2>&1 && shader_progress_reset
   validate_progress_reset
 
-  # Wait indefinitely â€” a cold shader compile can run well past any fixed
+  # Wait indefinitely — a cold shader compile can run well past any fixed
   # timeout and killing it mid-compile wastes the work. Operator cancels by
   # deleting the pod (same pattern as wait_for_steam_pipe).
   while :; do
@@ -1715,20 +1647,20 @@ wait_for_cs2_process() {
       return 0
     fi
 
-    # Skip requested â†’ dismiss the modal now (any time, not just the poke
+    # Skip requested → dismiss the modal now (any time, not just the poke
     # window) and stop holding open. Never in batch (clips must be warm).
     local skip_now=0
     if [ -f "$skip_marker" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
       skip_now=1
       if [ "$skip_logged" != 1 ]; then
-        log "  operator requested skip â€” dismissing shader modal, launching cs2"
+        log "  operator requested skip — dismissing shader modal, launching cs2"
         skip_logged=1
       fi
     fi
 
     # On operator skip: stop the fossilize_replay workers directly (deterministic
     # end to "Processing Vulkan shaders" regardless of dialog focus / black UI),
-    # and still poke the CEF dialog as a secondary nudge. Only on skip â€” we never
+    # and still poke the CEF dialog as a secondary nudge. Only on skip — we never
     # auto-kill the compile we normally want to run.
     if [ "$skip_now" = 1 ]; then
       declare -F skip_shader_compile >/dev/null 2>&1 && skip_shader_compile
@@ -1738,16 +1670,16 @@ wait_for_cs2_process() {
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
     # Steam client watchdog: the client can segfault after boot (breakpad dump
-    # fires, the steam.sh wrapper survives holding the IPC pipe) â€” every
+    # fires, the steam.sh wrapper survives holding the IPC pipe) — every
     # applaunch then "forwards" into the corpse and cs2 never spawns. Three
-    # consecutive 5s checks with no client process = dead â†’ full restart.
+    # consecutive 5s checks with no client process = dead → full restart.
     if [ $(( i % 5 )) -eq 0 ]; then
       if pgrep -f 'ubuntu12_32/steam' >/dev/null 2>&1; then
         steam_gone=0
       else
         steam_gone=$(( steam_gone + 1 ))
         if [ "$steam_gone" -ge 3 ]; then
-          log "  Steam client process gone ~15s (segfault?) â€” restarting Steam"
+          log "  Steam client process gone ~15s (segfault?) — restarting Steam"
           kill_steam
           start_steam
           wait_for_steam_pipe "${STEAM_PIPE_TIMEOUT:-300}"
@@ -1764,7 +1696,7 @@ wait_for_cs2_process() {
     local validating_active=0
     validate_report_progress && validating_active=1
 
-    # Report compile progress + whether it's actively running (inline â€” no
+    # Report compile progress + whether it's actively running (inline — no
     # bg process that can die and freeze the UI).
     local shaders_active=0
     if declare -F shader_report_progress >/dev/null 2>&1 && shader_report_progress; then
@@ -1775,12 +1707,12 @@ wait_for_cs2_process() {
 
     # Hold the launch open while a compile is active (don't re-issue applaunch).
     if [ "$skip_now" = 0 ] && [ "$shaders_active" = 1 ]; then
-      [ $(( i % 30 )) -eq 0 ] && log "  shaders still compiling â€” holding launch open"
+      [ $(( i % 30 )) -eq 0 ] && log "  shaders still compiling — holding launch open"
       sleep 1
       continue
     fi
 
-    # Cloud "Out of Date" modal: gate on the FRESH (boot-wiped) cloud_log â€” a 730
+    # Cloud "Out of Date" modal: gate on the FRESH (boot-wiped) cloud_log — a 730
     # conflict line means the modal is actually up THIS run. Only then dismiss.
     # Fresh log = no stale false-positives (won't fire on the shader screen).
     if [ $(( i % 4 )) -eq 0 ] \
@@ -1794,18 +1726,18 @@ wait_for_cs2_process() {
           cloud_pokes=$(( cloud_pokes + 1 ))
           log "  dismissed Cloud Out of Date modal (poke ${cloud_pokes}/${CLOUD_DISMISS_MAX:-1})"
         else
-          log "  dismiss_cloud_dialog failed â€” retrying in 4s"
+          log "  dismiss_cloud_dialog failed — retrying in 4s"
         fi
       fi
     fi
 
     # Re-applaunch recovery: after a fresh steamcmd download/update, Steam often
     # forwards the applaunch ("Steam is already running, command was forwarded")
-    # but never actually starts cs2 â€” the loop would then wait forever. Re-issue
+    # but never actually starts cs2 — the loop would then wait forever. Re-issue
     # the launch when cs2 is absent (loop top) AND nothing is in flight (no shader
     # compile, no file validation), after an initial grace, spaced out, and capped.
     # Tightly guarded so we never fire while a cs2 process exists or Steam is busy
-    # â€” that's the duplicate-instance wedge we must avoid.
+    # — that's the duplicate-instance wedge we must avoid.
     # i - last_active_i guards the post-compile handoff: when a compile just
     # finished, cs2 spawns within seconds, so we hold off re-launching until the
     # GPU/Steam has been idle for the grace window (last_active_i stays 0 when no
@@ -1816,23 +1748,23 @@ wait_for_cs2_process() {
        && [ $(( i - last_relaunch_i )) -ge "${CS2_RELAUNCH_INTERVAL:-30}" ]; then
       relaunches=$(( relaunches + 1 ))
       last_relaunch_i=$i
-      log "  cs2 not up after ${i}s with nothing in flight â€” re-issuing applaunch (#${relaunches}/${CS2_RELAUNCH_MAX:-5}); Steam likely dropped the first one after a download/update"
+      log "  cs2 not up after ${i}s with nothing in flight — re-issuing applaunch (#${relaunches}/${CS2_RELAUNCH_MAX:-5}); Steam likely dropped the first one after a download/update"
       "$applaunch_fn" || warn "  re-applaunch invocation failed"
     fi
 
-    # Quiet/slow compile: never auto-skip or die â€” only the UI skip button
+    # Quiet/slow compile: never auto-skip or die — only the UI skip button
     # skips. Wait indefinitely; operator cancels a wedged job from the UI.
     if [ "$shaders_seen" = 1 ] && [ "$skip_now" = 0 ] \
        && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ] \
        && [ $(( i % 60 )) -eq 0 ]; then
-      warn "  shader compile quiet ${SHADER_STALL_GRACE:-180}s+ (cs2 not up yet) â€” still waiting; cancel the job in the UI if it's truly stuck"
+      warn "  shader compile quiet ${SHADER_STALL_GRACE:-180}s+ (cs2 not up yet) — still waiting; cancel the job in the UI if it's truly stuck"
     fi
 
     case "$i" in
       60|120|180)
-        log "  diag @ ${i}s â€” open X windows:"
+        log "  diag @ ${i}s — open X windows:"
         list_x_windows 2>/dev/null | sed 's/^/    /' || true
-        log "  diag @ ${i}s â€” last 10 lines of $STEAM_LIBRARY/steam/logs/console-linux.txt:"
+        log "  diag @ ${i}s — last 10 lines of $STEAM_LIBRARY/steam/logs/console-linux.txt:"
         tail -10 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null | sed 's/^/    /' || true
         ;;
     esac

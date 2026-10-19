@@ -43,7 +43,7 @@ patch_title_from_gsi() {
     || say "  WARN title patch failed for $job_id"
 }
 
-# Mark one batch job status=error (per-job creds â€” no shared status channel).
+# Mark one batch job status=error (per-job creds — no shared status channel).
 batch_fail_job() {
   local job_id="$1" token="$2" reason="$3" body
   body=$(node "$CLIP_HELPERS" status-body "status=error" "error=${reason}" 2>/dev/null) \
@@ -142,7 +142,7 @@ recover_cs2_session() {
 batch_render_one_job() {
   local job_json="$1"
 
-  # One node spawn for every job field (NUL-separated â€” free-text fields
+  # One node spawn for every job field (NUL-separated — free-text fields
   # like title can contain anything except NUL, which job-fields strips).
   local -a F=()
   readarray -d '' -t F < <(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-fields)
@@ -232,7 +232,7 @@ batch_render_one_job() {
 }
 
 # Reap the oldest backgrounded upload tail (FIFO). Failures log the same
-# line the serial path used â€” the render POSTs status=error itself.
+# line the serial path used — the render POSTs status=error itself.
 reap_oldest_tail() {
   [ "${#TAIL_PIDS[@]}" -eq 0 ] && return 0
   local pid="${TAIL_PIDS[0]}" job="${TAIL_JOBS[0]}" marker="${TAIL_MARKERS[0]}"
@@ -245,12 +245,12 @@ reap_oldest_tail() {
 
 process_batch_jobs() {
   if [ -z "${CLIP_BATCH_JOBS:-}" ]; then
-    say "no CLIP_BATCH_JOBS â€” nothing to render"
+    say "no CLIP_BATCH_JOBS — nothing to render"
     return 0
   fi
 
-  rm -f "$CS2_FATAL_SENTINEL"   # fresh session â€” drop any stale fatal marker
-  # Fresh cs2 process for this batch â†’ its Vulkan pipelines are cold again. Drop
+  rm -f "$CS2_FATAL_SENTINEL"   # fresh session — drop any stale fatal marker
+  # Fresh cs2 process for this batch → its Vulkan pipelines are cold again. Drop
   # the warm marker so inline-clip-render re-warms on the first segment (see
   # warm_pipelines_if_cold). Keep the path in sync with CLIP_WARMUP_MARKER there.
   rm -f "${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}" \
@@ -285,7 +285,7 @@ process_batch_jobs() {
       continue
     fi
     while [ "${#TAIL_PIDS[@]}" -ge "$max_tails" ]; do
-      say "  ${#TAIL_PIDS[@]} upload tail(s) pending â€” reaping oldest before next job"
+      say "  ${#TAIL_PIDS[@]} upload tail(s) pending — reaping oldest before next job"
       reap_oldest_tail
     done
     batch_render_one_job "$job_json"
@@ -296,5 +296,5 @@ process_batch_jobs() {
     reap_oldest_tail
   done
 
-  say "batch-highlights: drained ${count} job(s) â€” exiting"
+  say "batch-highlights: drained ${count} job(s) — exiting"
 }
