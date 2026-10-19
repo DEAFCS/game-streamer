@@ -1,7 +1,6 @@
 import process from "node:process";
 
-import { execCfgCommand } from "../cs2/exec-cfg.mjs";
-import { sendConsoleCommand } from "../cs2/input.mjs";
+import { execCfgCommand, execCfgViaConsole } from "../cs2/exec-cfg.mjs";
 import { gsiState } from "../state/gsi.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { sendJson } from "../util/http.mjs";
@@ -77,11 +76,12 @@ export async function reconnectHandler(_req, res) {
   // the streamer disconnected, and the retry then had to type into the console.
   //
   // Not in a game (already on the menu, or a connect that never landed): the
-  // bind is dead there, so the console is the only way in.
+  // bind is dead there, so the console is the only way in, but only an `exec`
+  // is typed into it, never the address or password.
   const inGame = gsiState.mapName !== null;
   const ok = inGame
     ? await execCfgCommand(followUp)
-    : await sendConsoleCommand(followUp);
+    : await execCfgViaConsole(followUp);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
