@@ -202,10 +202,13 @@ do_applaunch() {
   # misbehaving node. Unset/0 omits the flag.
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
+  # No -console: it opens the console at launch, and the capture starts as soon
+  # as the window exists, so the stream showed the connect line. con_enable 1
+  # in live_autoexec.cfg keeps the console available for the exec-cfg path.
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
-    -novid -nojoy -high -console
+    -novid -nojoy -high
     "${thread_args[@]}"
     -disable_loadingplaque
     +cl_disablehtmlmotd 1

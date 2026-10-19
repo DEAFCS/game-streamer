@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { sendConsoleCommand } from "../cs2/input.mjs";
+import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { sendJson } from "../util/http.mjs";
 
@@ -65,7 +65,9 @@ export async function reconnectHandler(_req, res) {
     followUp = `password "${target.password}"; connect ${target.addr}`;
   }
 
-  const disconnectOk = await sendConsoleCommand("disconnect");
+  // exec-cfg, not the console: typing into it is visible on the stream and
+  // shows the server address and password.
+  const disconnectOk = await execCfgCommand("disconnect");
   if (!disconnectOk) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
@@ -73,7 +75,7 @@ export async function reconnectHandler(_req, res) {
 
   await new Promise((r) => setTimeout(r, 1000));
 
-  const ok = await sendConsoleCommand(followUp);
+  const ok = await execCfgCommand(followUp);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
